@@ -273,13 +273,13 @@ describe('registerAllTools category filtering', () => {
         registerAllTools(mockServer, mockClient, activeCategories);
 
         expect((mockServer.registerTool as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
-        // dashboard read tools are a subset of all 327 tools
-        expect((mockServer.registerTool as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThan(327);
+        // dashboard read tools are a subset of all 330 tools
+        expect((mockServer.registerTool as ReturnType<typeof vi.fn>).mock.calls.length).toBeLessThan(330);
     });
 
-    it('registers all 327 tools when no activeCategories provided', () => {
+    it('registers all 330 tools when no activeCategories provided', () => {
         registerAllTools(mockServer, mockClient);
-        expect(mockServer.registerTool).toHaveBeenCalledTimes(327);
+        expect(mockServer.registerTool).toHaveBeenCalledTimes(330);
     });
 
     it('registers zero tools when active categories map is empty', () => {
@@ -290,7 +290,7 @@ describe('registerAllTools category filtering', () => {
     it('registers all tools when all:rw is active', () => {
         const { categories: activeCategories } = parseToolCategories('all:rw');
         registerAllTools(mockServer, mockClient, activeCategories);
-        expect(mockServer.registerTool).toHaveBeenCalledTimes(327);
+        expect(mockServer.registerTool).toHaveBeenCalledTimes(330);
     });
 
     it('write-only filter registers only write tools for clients category', () => {
@@ -299,6 +299,31 @@ describe('registerAllTools category filtering', () => {
         const { categories: activeCategories } = parseToolCategories('clients:w');
         registerAllTools(mockServer, mockClient, activeCategories);
         expect((mockServer.registerTool as ReturnType<typeof vi.fn>).mock.calls.length).toBe(3);
+    });
+
+    it('wireless-radio write tools are not registered by default or with :r', () => {
+        for (const spec of [DEFAULT_TOOL_CATEGORIES, 'wireless-radio:r', 'wireless-all:r']) {
+            const register = vi.fn();
+            const { categories } = parseToolCategories(spec);
+            registerAllTools({ registerTool: register } as unknown as McpServer, mockClient, categories);
+            const names = register.mock.calls.map((call) => call[0]);
+            expect(names).not.toContain('setApRadioConfig');
+            expect(names).not.toContain('applyNetknifePlan');
+        }
+    });
+
+    it('wireless-radio:w registers only setApRadioConfig and applyNetknifePlan', () => {
+        const { categories } = parseToolCategories('wireless-radio:w');
+        registerAllTools(mockServer, mockClient, categories);
+        const names = (mockServer.registerTool as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0]);
+        expect(names.sort()).toEqual(['applyNetknifePlan', 'setApRadioConfig']);
+    });
+
+    it('wireless-radio:rw registers getNetknifeState together with the write tools', () => {
+        const { categories } = parseToolCategories('wireless-radio:rw');
+        registerAllTools(mockServer, mockClient, categories);
+        const names = (mockServer.registerTool as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0]);
+        expect(names).toEqual(expect.arrayContaining(['getNetknifeState', 'setApRadioConfig', 'applyNetknifePlan']));
     });
 
     it('logs active categories and tool count on startup', () => {

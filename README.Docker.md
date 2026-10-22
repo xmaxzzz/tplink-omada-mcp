@@ -44,6 +44,14 @@ A Model Context Protocol (MCP) server that exposes TP-Link Omada controller APIs
 
    Replace the environment variable values with your actual Omada controller credentials.
 
+   To let Claude read and **change** AP radio settings (NetKnife Wi-Fi planning: `getNetknifeState`, `setApRadioConfig`, `applyNetknifePlan`), add the categories explicitly — radio write tools are off by default:
+
+   ```json
+   "-e", "OMADA_TOOL_CATEGORIES=dashboard:r,devices-all:r,wireless-all:r,wireless-radio:rw",
+   ```
+
+   Both write tools default to `dryRun: true`; always review the returned diff before repeating the call with `dryRun: false`.
+
 4. **Restart Claude Desktop** to load the new MCP server configuration.
 
 5. **Verify the connection** by asking Claude to list your Omada sites or devices.
@@ -230,6 +238,9 @@ In client-credentials mode the server already treats `Mcp-Session-Id` as optiona
 | `getStackNetworkList` | Gets VLAN network list for a switch stack (paginated). Requires `stackId`. |
 | `getApUplinkConfig` | Gets uplink configuration for an AP (wired/mesh mode). Requires `apMac`. |
 | `getRadiosConfig` | Gets per-radio configuration for an AP (channel, power, width). Requires `apMac`. |
+| `getNetknifeState` | Snapshot of every AP's radio settings (channel, width, TX power, allowed channels/widths) as a NetKnife `netknife-omada/1` state file. Category `wireless-radio` (read). |
+| `setApRadioConfig` | **Write.** Change channel / width / TX power / on-off of one AP radio (`band` 2g/5g/5g1/5g2/6g). Validates against available channels, re-reads and verifies. `dryRun` defaults to `true`. Category `wireless-radio` (write). |
+| `applyNetknifePlan` | **Write.** Apply a NetKnife `netknife-omada/1` plan AP by AP (match by MAC, name fallback), radios only. Returns a state backup and per-AP results. `dryRun` defaults to `true`, `force` / `stopOnError` control mismatches and failures. Category `wireless-radio` (write). |
 | `getApVlanConfig` | Get VLAN configuration for an access point, including management VLAN and per-SSID VLAN tagging settings. |
 | `getMeshStatistics` | Gets mesh link statistics for an AP. Requires `apMac`. |
 | `getRFScanResult` | Gets last RF scan results for an AP. Requires `apMac`. |
@@ -516,6 +527,7 @@ In client-credentials mode the server already treats `Mcp-Session-Id` as optiona
 | `getGatewayLanPortStatus` | Get LAN port status for a specific gateway.               | `getGatewayLanStatus` |
 | `getGatewayPorts` | Get port info for a specific gateway.                     | `getGatewayPorts` |
 | `getAp` | Get detailed info for a specific access point.            | `getApDetail` |
+| `modifyRadiosConfig` | Modify AP radio config (PATCH `/aps/{apMac}/radio-config`). | `setApRadioConfig`, `applyNetknifePlan` |
 | `getApRadios` | Get radio info for a specific access point.               | `getApRadios` |
 | `getStackPorts` | Get port info for a switch stack.                         | `getStackPorts` |
 | `getGridPendingDevices` | List devices pending adoption in a site.                  | `listPendingDevices` |

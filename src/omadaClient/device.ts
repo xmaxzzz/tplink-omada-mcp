@@ -362,6 +362,23 @@ export class DeviceOperations {
     }
 
     /**
+     * Modify AP per-radio configuration (PATCH, write).
+     * OperationId: modifyRadiosConfig
+     */
+    public async modifyRadiosConfig(
+        apMac: string,
+        config: Record<string, unknown>,
+        siteId?: string,
+        customHeaders?: CustomHeaders
+    ): Promise<unknown> {
+        if (!apMac) throw new Error('An apMac must be provided.');
+        const resolvedSiteId = this.site.resolveSiteId(siteId);
+        const path = this.buildPath(`/sites/${encodeURIComponent(resolvedSiteId)}/aps/${encodeURIComponent(apMac)}/radio-config`);
+        const response = await this.request.patch<OmadaApiResponse<unknown>>(path, config, customHeaders);
+        return this.request.ensureSuccess(response);
+    }
+
+    /**
      * Get AP VLAN configuration.
      * OperationId: getApVlanConfig
      */

@@ -586,6 +586,24 @@ describe('omadaClient/device', () => {
         });
     });
 
+    describe('modifyRadiosConfig', () => {
+        it('should PATCH AP radio config', async () => {
+            const body = { radioSetting5g: { radioEnable: true, channel: '36', freq: 5180 } };
+            (mockRequest as unknown as { patch: ReturnType<typeof vi.fn> }).patch = vi.fn().mockResolvedValue({ errorCode: 0 });
+            const result = await deviceOps.modifyRadiosConfig('AA-BB-CC-DD-EE-FF', body, 'site-1');
+            expect(result).toBeUndefined();
+            expect((mockRequest as unknown as { patch: ReturnType<typeof vi.fn> }).patch).toHaveBeenCalledWith(
+                '/api/sites/site-1/aps/AA-BB-CC-DD-EE-FF/radio-config',
+                body,
+                undefined
+            );
+        });
+
+        it('should throw if apMac is empty', async () => {
+            await expect(deviceOps.modifyRadiosConfig('', {}, 'site-1')).rejects.toThrow('An apMac must be provided.');
+        });
+    });
+
     describe('getApVlanConfig', () => {
         it('should return AP VLAN config', async () => {
             const mockResponse: OmadaApiResponse<unknown> = { errorCode: 0, result: { managementVlan: 10 } };

@@ -276,7 +276,7 @@ an implementation tracker, and a reference for coding agents.
 | devices-ap | `getApVlanConfig` | GET | Get Ap Vlan Config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/vlan` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/vlan'].get` | ✅ Implemented |
 | devices-ap | `getMeshStatistics` | GET | Get ap mesh statistics | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/mesh/statistics` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/mesh/statistics'].get` | ✅ Implemented |
 | devices-ap | `getRadiosConfig` | GET | Get ap radio config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config'].get` | ✅ Implemented |
-| devices-ap | `getRadiosConfig` | PATCH | Modify ap radio config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config'].patch` | ✅ Implemented |
+| devices-ap | `setApRadioConfig` | PATCH | Modify ap radio config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config'].patch` | ✅ Implemented |
 | devices-ap | `getRFScanResult` | GET | Get rf scan result | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result'].get` | ✅ Implemented |
 | devices-ap | `getRFScanResult` | GET | Get rf scan result | `/openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result` | `docs/openapi/03-device.json` | `$.paths['/openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result'].get` | ✅ Implemented |
 | devices-ap | `getSitesApsAfc` | GET | Get ap AFC Status Info | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/afc` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/afc'].get` | ⬜ Not implemented |
@@ -440,6 +440,22 @@ an implementation tracker, and a reference for coding agents.
 | wireless-radio | `getSitesRfplanningHistory` | GET | get RF Planning Deploy History | `/openapi/v1/{omadacId}/sites/{siteId}/rfplanning/history` | `docs/openapi/04-site-setting.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/rfplanning/history'].get` | ⬜ Not implemented |
 | wireless-radio | `updateSitesRfplanningConfig` | PUT | modify RF Planning Deploy Config | `/openapi/v1/{omadacId}/sites/{siteId}/rfPlanning/config` | `docs/openapi/04-site-setting.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/rfPlanning/config'].put` | ⬜ Not implemented |
 | wireless-radio | `updateSitesRfplanningExcludeaps` | PUT | modify Exclude Aps | `/openapi/v1/{omadacId}/sites/{siteId}/rfPlanning/excludeAps` | `docs/openapi/04-site-setting.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/rfPlanning/excludeAps'].put` | ⬜ Not implemented |
+
+### Composite tools (NetKnife exchange, `netknife-omada/1`)
+
+Built on verified routes only: `GET /sites/{siteId}`, `GET /sites/{siteId}/devices`, `GET /sites/{siteId}/aps/{apMac}`,
+`GET|PATCH /sites/{siteId}/aps/{apMac}/radio-config`, `GET /sites/{siteId}/aps/{apMac}/available-channel` (all in `docs/openapi/02-organization.json` / `03-device.json`).
+Format spec: https://github.com/xmaxzzz/NetKnife/blob/HEAD/docs/OMADA-EXCHANGE.md
+
+| Category | Tool | Permission | Description | Status |
+|---|---|---|---|---|
+| wireless-radio | `getNetknifeState` | read | Radio state of every AP in the site as `kind: "state"` | ✅ Implemented |
+| wireless-radio | `setApRadioConfig` | write | Change one AP radio (channel / width / TX power / enabled); `dryRun` default `true`; verify after PATCH | ✅ Implemented |
+| wireless-radio | `applyNetknifePlan` | write | Apply a `kind: "plan"` file AP by AP with backup, `current` check, `force`, `stopOnError`; `dryRun` default `true` | ✅ Implemented |
+
+Field mapping (`ApRadioSetting`): width 20→`"2"`, 40→`"3"`, 80→`"5"`, 160→`"7"`, 240→`"9"`, 320→`"10"`, auto→`"4"` (2g) / `"6"` (5g) / `"8"` (6g);
+txPowerMode low/medium/high/custom/auto → `txPowerLevel` 0/1/2/3/4 (`txPower` only with custom);
+channel N → `channel: "N"` + `freq` from available-channel; auto → `channel: "0"` without `freq`.
 
 ## Category: wireless-auth
 
