@@ -22,7 +22,7 @@ export function registerApplyNetknifePlanTool(server: McpServer, client: OmadaCl
         'applyNetknifePlan',
         {
             description:
-                'WRITE: apply a NetKnife radio plan (netknife-omada/1, kind "plan") to the site APs — channel, width, TX power, radio on/off only (never SSIDs, site or other devices). APs are matched by MAC (name as fallback) and changed one at a time with verification after each. Null/missing fields are left unchanged. ALWAYS run with dryRun=true first (the default), show the per-AP diff to a human, then repeat with dryRun=false. Returns a backup (state before changes) and per-AP results.',
+                'WRITE: apply a NetKnife radio plan (netknife-omada/1, kind "plan") to the site APs — channel, width, TX power, radio on/off only (never SSIDs, site or other devices). APs are matched by MAC (name as fallback) and changed one at a time with verification after each. Null/missing fields are left unchanged. ALWAYS run with dryRun=true first (the default), show the per-AP diff to a human, then repeat with dryRun=false. Planned channels are checked against the AP available-channel list before any write: an unavailable channel is an error and that AP is not written (with stopOnError, the default, nothing is written). Returns a backup (state before changes), per-AP results and `warnings` (3+ APs on one channel in one band; the optional Helpdesk `warnings`) — warnings never block the write, show them to the human.',
             inputSchema: inputSchema.shape,
         },
         wrapToolHandler('applyNetknifePlan', async ({ plan, dryRun, force, stopOnError, siteId, customHeaders }) =>

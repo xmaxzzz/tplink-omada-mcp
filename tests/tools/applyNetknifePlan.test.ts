@@ -73,6 +73,16 @@ describe('tools/applyNetknifePlan', () => {
         expect(client.modifyRadiosConfig).toHaveBeenCalledWith('3C-64-CF-69-9A-64', expect.any(Object), 'site-1', undefined);
     });
 
+    it('returns warnings (plan check + Helpdesk) in the tool output', async () => {
+        const client = createFakeOmada([exampleAp()]);
+        registerApplyNetknifePlanTool(mockServer, client as unknown as OmadaClient);
+        const withWarnings = { ...plan, warnings: [{ code: 'single_channel_ap', band: '5', aps: ['Кухня'], text: 'одна точка на канале' }] };
+        const result = await toolHandler({ plan: withWarnings }, { sessionId: 's' });
+        const body = JSON.parse(result.content[0].text);
+        expect(body.warnings).toEqual([expect.objectContaining({ source: 'helpdesk', text: 'Helpdesk предупреждает: одна точка на канале' })]);
+        expect(body.results[0].status).toBe('dry-run');
+    });
+
     it('rejects an invalid plan', async () => {
         registerApplyNetknifePlanTool(mockServer, createFakeOmada([]) as unknown as OmadaClient);
         await expect(toolHandler({ plan: { kind: 'state' } }, { sessionId: 's' })).rejects.toThrow('plan does not match');

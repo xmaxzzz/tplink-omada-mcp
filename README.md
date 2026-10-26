@@ -428,7 +428,7 @@ In client-credentials mode the server already treats `Mcp-Session-Id` as optiona
 | `getRadiosConfig` | Gets per-radio configuration for an AP (channel, power, width). Requires `apMac`. |
 | `getNetknifeState` | Snapshot of every AP's radio settings (channel, width, TX power, allowed channels/widths) as a NetKnife `netknife-omada/1` state file. Category `wireless-radio` (read). |
 | `setApRadioConfig` | **Write.** Change channel / width / TX power / on-off of one AP radio (`band` 2g/5g/5g1/5g2/6g). Validates against available channels, re-reads and verifies. `dryRun` defaults to `true`. Category `wireless-radio` (write). |
-| `applyNetknifePlan` | **Write.** Apply a NetKnife `netknife-omada/1` plan AP by AP (match by MAC, name fallback), radios only. Returns a state backup and per-AP results. `dryRun` defaults to `true`, `force` / `stopOnError` control mismatches and failures. Category `wireless-radio` (write). |
+| `applyNetknifePlan` | **Write.** Apply a NetKnife `netknife-omada/1` plan AP by AP (match by MAC, name fallback), radios only. Returns a state backup and per-AP results. `dryRun` defaults to `true`, `force` / `stopOnError` control mismatches and failures. Channels outside the AP's available list are rejected before any write (with `stopOnError` the whole plan is blocked). `warnings` lists 3+ APs on one channel and the plan's optional Helpdesk `warnings` (`[{code, band, aps, text}]`) — advisory, never blocking. Category `wireless-radio` (write). |
 | `getApVlanConfig` | Get VLAN configuration for an access point, including management VLAN and per-SSID VLAN tagging settings. |
 | `getMeshStatistics` | Gets mesh link statistics for an AP. Requires `apMac`. |
 | `getRFScanResult` | Gets last RF scan results for an AP. Requires `apMac`. |

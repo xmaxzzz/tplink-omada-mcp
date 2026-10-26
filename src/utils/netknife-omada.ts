@@ -100,6 +100,8 @@ export const netknifePlanSchema = z.object({
             })
             .refine((ap) => Boolean(ap.mac || ap.name), { message: 'each AP needs mac or name' })
     ),
+    // Optional advisory list from Helpdesk ({code, band, aps, text}[]). Never validated strictly and never blocks a write.
+    warnings: z.unknown().optional(),
 });
 export type NetknifePlan = z.infer<typeof netknifePlanSchema>;
 
@@ -530,14 +532,29 @@ export interface ApplyPlanOptions {
     customHeaders?: CustomHeaders;
 }
 
+/** Advisory message: shown to the human, never blocks the write. */
+export interface PlanWarning {
+    /** "plan-check" — computed here from the plan; "helpdesk" — passed through from the plan's own warnings field. */
+    source: 'plan-check' | 'helpdesk';
+    code: string;
+    band: string | null;
+    channel?: number;
+    aps: string[];
+    text: string;
+}
+
 export interface ApplyPlanResult {
     format: typeof NETKNIFE_FORMAT;
     kind: 'apply-result';
     dryRun: boolean;
     backup: NetknifeState;
+    warnings: PlanWarning[];
     results: ApplyPlanApResult[];
     summary: Record<ApplyStatus, number>;
 }
+
+/** This many APs (or more) on one channel in one band trigger a warning. */
+export const SAME_CHANNEL_WARN_THRESHOLD = 3;
 
 /** Parse a plan given either as an object or as a JSON string. */
 export function parseNetknifePlan(input: unknown): NetknifePlan {
@@ -590,17 +607,107 @@ export function currentMismatches(ap: ApState, current: NetknifePlan['aps'][numb
     return mismatches;
 }
 
-/** Apply a netknife-omada/1 plan AP by AP. Backup (state before changes) is always returned. */
+/** Frequency band of a radio key, as used in warnings: 5g / 5g1 / 5g2 share channel numbers. */
+function bandLabel(band: RadioBand): string {
+    if (band === '2g') return '2.4';
+    if (band === '6g') return '6';
+    return '5';
+}
+
+/** Radio of a matched AP for a plan band key ("5g1" in the plan may be exposed as "5g" in the state). */
+function stateRadio(ap: ApState, band: RadioBand): RadioState | undefined {
+    return ap.radios[band] ?? (band === '5g1' ? ap.radios['5g'] : undefined);
+}
+
+/**
+ * Check every numeric channel in the plan against the AP's available channels (from the backup read)
+ * before anything is written. Returns plan index → error message. APs that are not found or unreadable
+ * are left to the main loop; per-AP validation in mergeRadioChange stays as the last line.
+ */
+export function planChannelErrors(plan: NetknifePlan, state: NetknifeState): Map<number, string> {
+    const errors = new Map<number, string>();
+    plan.aps.forEach((entry, index) => {
+        const ap = findAp(state, entry.mac, entry.name);
+        if (!ap || ap.error) return;
+        const messages: string[] = [];
+        for (const [band, rawChange] of Object.entries(entry.radios) as [RadioBand, RadioChange | null][]) {
+            const channel = rawChange?.channel;
+            const radio = stateRadio(ap, band);
+            if (typeof channel !== 'number' || !radio || radio.channels.includes(channel)) continue;
+            messages.push(`${band}: channel ${channel} is not available on this AP (allowed: ${radio.channels.join(', ') || 'none'})`);
+        }
+        if (messages.length > 0) errors.set(index, messages.join('; '));
+    });
+    return errors;
+}
+
+/** Warn when the plan puts SAME_CHANNEL_WARN_THRESHOLD or more enabled radios on one channel of one band. */
+export function sameChannelWarnings(plan: NetknifePlan, state: NetknifeState): PlanWarning[] {
+    const groups = new Map<string, { band: string; channel: number; aps: string[] }>();
+    for (const entry of plan.aps) {
+        const ap = findAp(state, entry.mac, entry.name);
+        const label = ap?.name ?? entry.name ?? (entry.mac ? formatMac(entry.mac) : '?');
+        for (const [band, rawChange] of Object.entries(entry.radios) as [RadioBand, RadioChange | null][]) {
+            const change = compactChange(rawChange);
+            if (typeof change.channel !== 'number') continue;
+            const enabled = change.enabled ?? (ap ? stateRadio(ap, band)?.enabled : undefined) ?? true;
+            if (!enabled) continue;
+            const key = `${bandLabel(band)}:${change.channel}`;
+            const group = groups.get(key) ?? { band: bandLabel(band), channel: change.channel, aps: [] };
+            if (!group.aps.includes(label)) group.aps.push(label);
+            groups.set(key, group);
+        }
+    }
+    return [...groups.values()]
+        .filter((g) => g.aps.length >= SAME_CHANNEL_WARN_THRESHOLD)
+        .map((g) => ({
+            source: 'plan-check' as const,
+            code: 'plan_same_channel',
+            band: g.band,
+            channel: g.channel,
+            aps: g.aps,
+            text: `План ставит ${g.aps.length} точек на канал ${g.channel} (${g.band} ГГц): ${g.aps.join(', ')}. Проверьте план перед записью.`,
+        }));
+}
+
+/** Normalize the optional Helpdesk "warnings" field. Malformed items are kept as far as possible, never rejected. */
+export function helpdeskWarnings(raw: unknown): PlanWarning[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.map((item) => {
+        const record = asRecord(item);
+        const code = str(record.code) ?? 'unknown';
+        const aps = Array.isArray(record.aps) ? record.aps.filter((a): a is string => typeof a === 'string') : [];
+        const text = str(record.text) ?? (typeof item === 'string' ? item : code);
+        return { source: 'helpdesk' as const, code, band: str(record.band), aps, text: `Helpdesk предупреждает: ${text}` };
+    });
+}
+
+/**
+ * Apply a netknife-omada/1 plan AP by AP. Backup (state before changes) is always returned.
+ *
+ * Before any write, every planned channel is checked against the AP's available channels. An AP with an
+ * unavailable channel is an error and is never written. With stopOnError (default) the whole plan is
+ * blocked — the remaining APs are skipped, so a bad plan is never half-applied; without it the other APs proceed.
+ * Warnings (3+ APs on one channel, Helpdesk warnings) are reported in dry-run and write mode but never block.
+ */
 export async function applyNetknifePlan(client: RadioClient, planInput: unknown, options: ApplyPlanOptions): Promise<ApplyPlanResult> {
     const plan = parseNetknifePlan(planInput);
     const backup = await collectNetknifeState(client, { siteId: options.siteId, siteName: plan.site, customHeaders: options.customHeaders });
+    const warnings = [...sameChannelWarnings(plan, backup), ...helpdeskWarnings(plan.warnings)];
+    const channelErrors = planChannelErrors(plan, backup);
+    const blocked = options.stopOnError && channelErrors.size > 0;
     const results: ApplyPlanApResult[] = [];
     let stopped = false;
 
-    for (const entry of plan.aps) {
+    for (const [index, entry] of plan.aps.entries()) {
         const base = { mac: entry.mac ? formatMac(entry.mac) : null, name: entry.name ?? null, diff: {} };
+        const channelError = channelErrors.get(index);
         if (stopped) {
             results.push({ ...base, status: 'skipped', reason: 'not attempted: stopped after previous error (stopOnError)' });
+            continue;
+        }
+        if (blocked && !channelError) {
+            results.push({ ...base, status: 'skipped', reason: 'not attempted: plan has APs with unavailable channels (stopOnError)' });
             continue;
         }
         const ap = findAp(backup, entry.mac, entry.name);
@@ -612,6 +719,11 @@ export async function applyNetknifePlan(client: RadioClient, planInput: unknown,
         const matched = { ...base, mac: ap.mac, name: ap.name };
         if (ap.error) {
             results.push({ ...matched, status: 'error', error: `could not read AP state: ${ap.error}` });
+            stopped = options.stopOnError;
+            continue;
+        }
+        if (channelError) {
+            results.push({ ...matched, status: 'error', error: channelError });
             stopped = options.stopOnError;
             continue;
         }
@@ -651,5 +763,6 @@ export async function applyNetknifePlan(client: RadioClient, planInput: unknown,
 
     const summary: Record<ApplyStatus, number> = { applied: 0, skipped: 0, error: 0, 'dry-run': 0 };
     for (const r of results) summary[r.status]++;
-    return { format: NETKNIFE_FORMAT, kind: 'apply-result', dryRun: options.dryRun, backup, results, summary };
+    if (warnings.length > 0) logger.warn('NetKnife plan warnings', { dryRun: options.dryRun, warnings: warnings.map((w) => w.text).join(' | ') });
+    return { format: NETKNIFE_FORMAT, kind: 'apply-result', dryRun: options.dryRun, backup, warnings, results, summary };
 }
