@@ -556,8 +556,62 @@ export interface ApplyPlanResult {
 /** This many APs (or more) on one channel in one band trigger a warning. */
 export const SAME_CHANNEL_WARN_THRESHOLD = 3;
 
-/** Parse a plan given either as an object or as a JSON string. */
-export function parseNetknifePlan(input: unknown): NetknifePlan {
+const CURRENT_NUMERIC_FIELDS = ['channel', 'width', 'txPower'] as const;
+const NUMERIC_STRING = /^-?\d+(\.\d+)?$/;
+
+/**
+ * Soft normalization of the plan's "current" block (a reconciliation hint, never written): numeric strings
+ * ("36", "20") become numbers and "" becomes null, as older Helpdesk/NetKnife exports wrote them. Returns a copy
+ * and one warning listing the affected APs. "radios" (what gets written) is left as is and validated strictly.
+ */
+export function normalizePlanCurrent(value: unknown): { value: unknown; warnings: PlanWarning[] } {
+    const plan = asRecord(value);
+    if (!Array.isArray(plan.aps)) return { value, warnings: [] };
+    const fixed: string[] = [];
+    const aps = plan.aps.map((rawAp) => {
+        const ap = asRecord(rawAp);
+        const current = asRecord(ap.current);
+        if (typeof rawAp !== 'object' || rawAp === null || Object.keys(current).length === 0) return rawAp;
+        const fields: string[] = [];
+        const nextCurrent = Object.fromEntries(
+            Object.entries(current).map(([band, rawRadio]) => {
+                if (typeof rawRadio !== 'object' || rawRadio === null) return [band, rawRadio];
+                const radio: Record<string, unknown> = { ...(rawRadio as Record<string, unknown>) };
+                for (const field of CURRENT_NUMERIC_FIELDS) {
+                    const v = radio[field];
+                    if (typeof v !== 'string' || v === 'auto') continue;
+                    if (v.trim() === '') radio[field] = null;
+                    else if (NUMERIC_STRING.test(v.trim())) radio[field] = Number(v.trim());
+                    else continue;
+                    fields.push(`${band}.${field}`);
+                }
+                return [band, radio];
+            })
+        );
+        if (fields.length === 0) return rawAp;
+        fixed.push(`${str(ap.name) ?? str(ap.mac) ?? '?'} (${fields.join(', ')})`);
+        return { ...ap, current: nextCurrent };
+    });
+    if (fixed.length === 0) return { value, warnings: [] };
+    return {
+        value: { ...plan, aps },
+        warnings: [
+            {
+                source: 'plan-check',
+                code: 'plan_current_strings',
+                band: null,
+                aps: fixed,
+                text: `В блоке current плана числа записаны строками — приведены к числам для сверки (на запись не влияет): ${fixed.join('; ')}. Перевыгрузите план из Helpdesk.`,
+            },
+        ],
+    };
+}
+
+/**
+ * Parse a plan given either as an object or as a JSON string. Warnings from the soft normalization of
+ * "current" (see normalizePlanCurrent) are appended to `warnings` when given.
+ */
+export function parseNetknifePlan(input: unknown, warnings?: PlanWarning[]): NetknifePlan {
     let value = input;
     if (typeof input === 'string') {
         try {
@@ -566,6 +620,9 @@ export function parseNetknifePlan(input: unknown): NetknifePlan {
             throw new Error(`plan is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
+    const normalized = normalizePlanCurrent(value);
+    value = normalized.value;
+    warnings?.push(...normalized.warnings);
     const parsed = netknifePlanSchema.safeParse(value);
     if (!parsed.success) {
         throw new Error(
@@ -691,9 +748,10 @@ export function helpdeskWarnings(raw: unknown): PlanWarning[] {
  * Warnings (3+ APs on one channel, Helpdesk warnings) are reported in dry-run and write mode but never block.
  */
 export async function applyNetknifePlan(client: RadioClient, planInput: unknown, options: ApplyPlanOptions): Promise<ApplyPlanResult> {
-    const plan = parseNetknifePlan(planInput);
+    const parseWarnings: PlanWarning[] = [];
+    const plan = parseNetknifePlan(planInput, parseWarnings);
     const backup = await collectNetknifeState(client, { siteId: options.siteId, siteName: plan.site, customHeaders: options.customHeaders });
-    const warnings = [...sameChannelWarnings(plan, backup), ...helpdeskWarnings(plan.warnings)];
+    const warnings = [...parseWarnings, ...sameChannelWarnings(plan, backup), ...helpdeskWarnings(plan.warnings)];
     const channelErrors = planChannelErrors(plan, backup);
     const blocked = options.stopOnError && channelErrors.size > 0;
     const results: ApplyPlanApResult[] = [];

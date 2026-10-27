@@ -14,6 +14,8 @@ import {
     helpdeskWarnings,
     type NetknifeState,
     normalizeMac,
+    normalizePlanCurrent,
+    type PlanWarning,
     parseNetknifePlan,
     planChannelErrors,
     radioStateFromSetting,
@@ -342,6 +344,72 @@ describe('utils/netknife-omada', () => {
             expect(() => parseNetknifePlan({ ...fixture })).toThrow('kind');
             expect(() => parseNetknifePlan({ format: 'netknife-omada/1', kind: 'plan', aps: [{ radios: {} }] })).toThrow('each AP needs mac or name');
         });
+
+        it('accepts "auto" for channel and width in radios and current', () => {
+            const auto = { channel: 'auto', width: 'auto', txPowerMode: 'auto', txPower: null };
+            const plan = parseNetknifePlan({
+                format: 'netknife-omada/1',
+                kind: 'plan',
+                aps: [
+                    {
+                        mac: '3C-64-CF-69-9A-64',
+                        radios: { '2g': auto, '5g': auto },
+                        current: { '2g': { channel: 'auto', width: 'auto', txPower: 14 } },
+                    },
+                ],
+            });
+            expect(plan.aps[0].radios['5g']).toMatchObject({ channel: 'auto', width: 'auto' });
+            expect(plan.aps[0].current?.['2g']).toMatchObject({ channel: 'auto', width: 'auto' });
+        });
+
+        it('normalizes numeric strings in current with a warning; radios stay strict', () => {
+            const warnings: PlanWarning[] = [];
+            const plan = parseNetknifePlan(
+                {
+                    format: 'netknife-omada/1',
+                    kind: 'plan',
+                    aps: [
+                        {
+                            name: 'Кухня',
+                            mac: '3C-64-CF-69-9A-64',
+                            radios: { '2g': { channel: 1, width: 20 } },
+                            current: { '2g': { channel: '1', width: '20', txPower: 14 }, '5g': { channel: 'auto', width: '80', txPower: '' } },
+                        },
+                        { name: 'Холл', mac: '3C-64-CF-69-9A-65', radios: {}, current: { '5g': { channel: 36, width: 40, txPower: 20 } } },
+                    ],
+                },
+                warnings
+            );
+            expect(plan.aps[0].current).toEqual({
+                '2g': { channel: 1, width: 20, txPower: 14 },
+                '5g': { channel: 'auto', width: 80, txPower: null },
+            });
+            expect(warnings).toHaveLength(1);
+            expect(warnings[0]).toMatchObject({
+                source: 'plan-check',
+                code: 'plan_current_strings',
+                aps: ['Кухня (2g.channel, 2g.width, 5g.width, 5g.txPower)'],
+            });
+
+            const strict = (radios: Record<string, unknown>) => () =>
+                parseNetknifePlan({ format: 'netknife-omada/1', kind: 'plan', aps: [{ mac: '3C-64-CF-69-9A-64', radios: { '2g': radios } }] });
+            expect(strict({ channel: '1' })).toThrow('aps.0.radios.2g.channel');
+            expect(strict({ width: '20' })).toThrow('aps.0.radios.2g.width');
+            expect(strict({ txPower: '17' })).toThrow('aps.0.radios.2g.txPower');
+            expect(() =>
+                parseNetknifePlan({
+                    format: 'netknife-omada/1',
+                    kind: 'plan',
+                    aps: [{ mac: '3C-64-CF-69-9A-64', current: { '2g': { channel: 'six' } } }],
+                })
+            ).toThrow('aps.0.current.2g.channel');
+        });
+
+        it('leaves a clean plan untouched', () => {
+            const plan = planFromState(fixture);
+            expect(normalizePlanCurrent(plan)).toEqual({ value: plan, warnings: [] });
+            expect(normalizePlanCurrent('oops')).toEqual({ value: 'oops', warnings: [] });
+        });
     });
 
     describe('currentMismatches', () => {
@@ -418,6 +486,27 @@ describe('utils/netknife-omada', () => {
             const client = createFakeOmada([exampleAp()]);
             const forced = await applyNetknifePlan(client, plan, { ...options, dryRun: false, force: true });
             expect(forced.results[0]).toMatchObject({ status: 'applied', mismatches: ['5g.channel: plan expects 40, controller has 36'] });
+        });
+
+        it('dry-run accepts an older Helpdesk plan with numeric strings in current and warns about it', async () => {
+            const client = createFakeOmada([exampleAp()]);
+            const plan = {
+                format: 'netknife-omada/1',
+                kind: 'plan',
+                aps: [
+                    {
+                        name: 'Кухня',
+                        mac: '3C-64-CF-69-9A-64',
+                        radios: { '5g': { channel: 44, width: 40 } },
+                        current: { '2g': { channel: '6', width: '20', txPower: 14 }, '5g': { channel: '36', width: '40', txPower: 20 } },
+                    },
+                ],
+            };
+            const result = await applyNetknifePlan(client, plan, options);
+            expect(result.results[0]).toMatchObject({ status: 'dry-run', diff: { '5g': { channel: { from: 36, to: 44 } } } });
+            expect(result.results[0].mismatches).toBeUndefined();
+            expect(result.warnings.map((w) => w.code)).toEqual(['plan_current_strings']);
+            expect(client.modifyRadiosConfig).not.toHaveBeenCalled();
         });
 
         it('matches by name when mac is absent, stops on error by default', async () => {
