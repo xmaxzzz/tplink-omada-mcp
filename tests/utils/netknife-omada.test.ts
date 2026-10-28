@@ -18,6 +18,8 @@ import {
     type PlanWarning,
     parseNetknifePlan,
     planChannelErrors,
+    planListedAps,
+    planListReport,
     radioStateFromSetting,
     radiosFromConfig,
     resolveBand,
@@ -509,23 +511,97 @@ describe('utils/netknife-omada', () => {
             expect(client.modifyRadiosConfig).not.toHaveBeenCalled();
         });
 
-        it('matches by name when mac is absent, stops on error by default', async () => {
+        it('matches by name when mac is absent', async () => {
             const client = createFakeOmada([exampleAp()]);
-            const plan = {
-                format: 'netknife-omada/1',
-                kind: 'plan',
-                aps: [
-                    { name: 'Гостиная', mac: 'AA-AA-AA-AA-AA-AA', radios: { '2g': { channel: 1 } } },
-                    { name: 'Кухня', radios: { '2g': { channel: 11 } } },
-                ],
-            };
-            const stopped = await applyNetknifePlan(client, plan, options);
-            expect(stopped.results.map((r) => r.status)).toEqual(['error', 'skipped']);
-            expect(stopped.results[1].reason).toContain('stopOnError');
+            const plan = { format: 'netknife-omada/1', kind: 'plan', aps: [{ name: 'Кухня', radios: { '2g': { channel: 11 } } }] };
+            const result = await applyNetknifePlan(client, plan, options);
+            expect(result.results[0]).toMatchObject({ status: 'dry-run', mac: '3C-64-CF-69-9A-64', name: 'Кухня' });
+        });
 
-            const continued = await applyNetknifePlan(client, plan, { ...options, stopOnError: false });
-            expect(continued.results.map((r) => r.status)).toEqual(['error', 'dry-run']);
-            expect(continued.results[1]).toMatchObject({ mac: '3C-64-CF-69-9A-64', name: 'Кухня' });
+        describe('APs not on the controller (skipped, never an error)', () => {
+            // As in plan 3 of "Алые паруса": two APs without MAC at the end of the list, unknown to Omada.
+            const plan = (radios: (i: number) => Record<string, unknown>) => {
+                const base = planFor(manyAps(3), radios);
+                return {
+                    ...base,
+                    aps: [
+                        ...base.aps,
+                        { name: 'AP 00:5A', mac: null, radios: { '5g': { channel: 44 } } },
+                        { name: 'AP EC:20', radios: { '2g': { channel: 6 } } },
+                    ],
+                };
+            };
+
+            it('dry-run: unknown APs skipped with a reason, the others are processed', async () => {
+                const client = createFakeOmada(manyAps(3));
+                const result = await applyNetknifePlan(
+                    client,
+                    plan((i) => ({ '5g': { channel: [40, 44, 48][i] } })),
+                    options
+                );
+                expect(result.summary).toEqual({ applied: 0, skipped: 2, error: 0, 'dry-run': 3 });
+                expect(result.results.slice(3)).toEqual([
+                    {
+                        mac: null,
+                        name: 'AP 00:5A',
+                        status: 'skipped',
+                        diff: {},
+                        reason: 'not on the controller: plan has no MAC and no unique AP named "AP 00:5A" on the site — not written',
+                    },
+                    expect.objectContaining({ name: 'AP EC:20', status: 'skipped', reason: expect.stringContaining('no MAC') }),
+                ]);
+            });
+
+            it('write: the known APs are applied, the run has no errors, stopOnError is not triggered', async () => {
+                const client = createFakeOmada(manyAps(3));
+                const result = await applyNetknifePlan(
+                    client,
+                    plan((i) => ({ '5g': { channel: [40, 44, 48][i] } })),
+                    {
+                        ...options,
+                        dryRun: false,
+                    }
+                );
+                expect(result.summary).toEqual({ applied: 3, skipped: 2, error: 0, 'dry-run': 0 });
+                expect(client.modifyRadiosConfig).toHaveBeenCalledTimes(3);
+            });
+
+            it('an unknown MAC is skipped too, also in the middle of the plan', async () => {
+                const aps = manyAps(2);
+                const client = createFakeOmada(structuredClone(aps));
+                const result = await applyNetknifePlan(
+                    client,
+                    {
+                        format: 'netknife-omada/1',
+                        kind: 'plan',
+                        aps: [
+                            { name: 'AP-1', mac: aps[0].mac, radios: { '5g': { channel: 40 } } },
+                            { name: 'Гостиная', mac: 'aa:aa:aa:aa:aa:aa', radios: { '2g': { channel: 1 } } },
+                            { mac: 'BB-BB-BB-BB-BB-BB', radios: { '2g': { channel: 1 } } },
+                            { name: 'AP-2', mac: aps[1].mac, radios: { '5g': { channel: 44 } } },
+                        ],
+                    },
+                    { ...options, dryRun: false }
+                );
+                expect(result.results.map((r) => r.status)).toEqual(['applied', 'skipped', 'skipped', 'applied']);
+                expect(result.results[1]).toMatchObject({
+                    mac: 'AA-AA-AA-AA-AA-AA',
+                    reason: 'not on the controller: MAC AA-AA-AA-AA-AA-AA not found on the site (nor a unique AP named "Гостиная") — not written',
+                });
+                expect(result.results[2].reason).toBe('not on the controller: MAC BB-BB-BB-BB-BB-BB not found on the site — not written');
+                expect(result.summary.error).toBe(0);
+            });
+
+            it('an unreadable AP is still an error and stops the plan', async () => {
+                const client = createFakeOmada(manyAps(2));
+                client.getApDetail.mockRejectedValueOnce(new Error('timeout'));
+                const result = await applyNetknifePlan(
+                    client,
+                    planFor(manyAps(2), () => ({ '2g': { channel: 1 } })),
+                    options
+                );
+                expect(result.results.map((r) => r.status)).toEqual(['error', 'skipped']);
+            });
         });
 
         it('reports validation errors, unreadable APs and failed verification as errors', async () => {
@@ -710,6 +786,32 @@ describe('utils/netknife-omada', () => {
                 expect(client.modifyRadiosConfig).toHaveBeenCalledTimes(2);
             });
 
+            it('new Helpdesk warning codes are passed through and never block', async () => {
+                const aps = manyAps(2);
+                const helpdesk = [
+                    { code: 'ap_no_rooms', band: null, aps: ['AP-2'], text: 'у AP-2 нет комнат' },
+                    { code: 'room_coverage_low', band: '5', aps: ['AP-1'], text: 'слабое покрытие в спальне' },
+                    { code: 'tx_floor', band: '2.4', aps: ['AP-1', 'AP-2'], text: 'мощность упёрлась в минимум' },
+                    { code: 'some_future_code', band: '6', aps: [], text: 'код из будущей версии', extra: 1 },
+                ];
+                const client = createFakeOmada(aps);
+                const result = await applyNetknifePlan(
+                    client,
+                    planFor(aps, (i) => ({ '5g': { channel: [40, 44][i] } }), { warnings: helpdesk }),
+                    {
+                        ...options,
+                        dryRun: false,
+                    }
+                );
+                expect(result.warnings.map((w) => [w.source, w.code])).toEqual([
+                    ['helpdesk', 'ap_no_rooms'],
+                    ['helpdesk', 'room_coverage_low'],
+                    ['helpdesk', 'tx_floor'],
+                    ['helpdesk', 'some_future_code'],
+                ]);
+                expect(result.summary).toEqual({ applied: 2, skipped: 0, error: 0, 'dry-run': 0 });
+            });
+
             it('tolerates malformed Helpdesk warnings', () => {
                 expect(helpdeskWarnings(undefined)).toEqual([]);
                 expect(helpdeskWarnings({ code: 'x' })).toEqual([]);
@@ -719,6 +821,143 @@ describe('utils/netknife-omada', () => {
                     { source: 'helpdesk', code: 'single_channel_ap', band: null, aps: ['AP-1'], text: 'Helpdesk предупреждает: single_channel_ap' },
                 ]);
                 expect(() => parseNetknifePlan({ format: 'netknife-omada/1', kind: 'plan', aps: [], warnings: 'oops' })).not.toThrow();
+            });
+        });
+
+        describe('plan lists unmanaged / unchanged (reported, never written)', () => {
+            const lists = {
+                unmanaged: [
+                    { name: 'AP 00:5A', mac: null, reason: 'no_mac', text: 'нет MAC в Helpdesk' },
+                    { name: 'AP EC:20', mac: 'ec:20:aa:bb:cc:dd', reason: 'not_in_omada', text: 'нет в Omada' },
+                ],
+                unchanged: [{ name: 'AP-2', mac: '3C-64-CF-69-9A-11', reason: 'not_surveyed', text: 'не обследована' }],
+                someFutureField: { x: 1 },
+            };
+
+            it('parses with and without the lists; unknown top-level fields are ignored', () => {
+                const plain = parseNetknifePlan(planFor(manyAps(1), () => ({ '5g': { channel: 40 } })));
+                expect(planListReport(plain)).toEqual([]);
+                const withLists = parseNetknifePlan(JSON.stringify(planFor(manyAps(1), () => ({ '5g': { channel: 40 } }), lists)));
+                expect(withLists).not.toHaveProperty('someFutureField');
+                expect(planListReport(withLists)).toEqual(['unmanaged: 2 (не записываются): AP 00:5A, AP EC:20', 'unchanged: 1: AP-2']);
+            });
+
+            it('dry-run and write report the lists; only "aps" is written', async () => {
+                const aps = manyAps(2);
+                const plan = planFor([aps[0]], () => ({ '5g': { channel: 40 } }), lists);
+
+                const dry = await applyNetknifePlan(createFakeOmada(structuredClone(aps)), plan, options);
+                expect(dry.summary).toEqual({ applied: 0, skipped: 0, error: 0, 'dry-run': 1 });
+                expect(dry.unmanaged).toEqual([
+                    { name: 'AP 00:5A', mac: null, reason: 'no_mac', text: 'нет MAC в Helpdesk' },
+                    { name: 'AP EC:20', mac: 'EC-20-AA-BB-CC-DD', reason: 'not_in_omada', text: 'нет в Omada' },
+                ]);
+                expect(dry.unchanged).toEqual([{ name: 'AP-2', mac: '3C-64-CF-69-9A-11', reason: 'not_surveyed', text: 'не обследована' }]);
+                expect(dry.report).toEqual(['unmanaged: 2 (не записываются): AP 00:5A, AP EC:20', 'unchanged: 1: AP-2']);
+
+                const client = createFakeOmada(structuredClone(aps));
+                const write = await applyNetknifePlan(client, plan, { ...options, dryRun: false });
+                expect(write.summary).toEqual({ applied: 1, skipped: 0, error: 0, 'dry-run': 0 });
+                expect(write.report).toEqual(dry.report);
+                expect(client.modifyRadiosConfig).toHaveBeenCalledTimes(1);
+                expect(client.modifyRadiosConfig.mock.calls[0][0]).toBe(aps[0].mac);
+            });
+
+            it('tolerates malformed lists', () => {
+                expect(planListedAps(undefined)).toEqual([]);
+                expect(planListedAps({ name: 'x' })).toEqual([]);
+                expect(planListedAps(['Чердак', null, { mac: 'not-a-mac', reason: 7 }])).toEqual([
+                    { name: 'Чердак', mac: null, reason: null, text: null },
+                    { name: null, mac: null, reason: null, text: null },
+                    { name: null, mac: 'not-a-mac', reason: null, text: null },
+                ]);
+                const plan = parseNetknifePlan({ format: 'netknife-omada/1', kind: 'plan', aps: [], unmanaged: 'oops', unchanged: [{}] });
+                expect(planListReport(plan)).toEqual(['unchanged: 1: ?']);
+            });
+        });
+
+        describe('empty channelRange (the 5 GHz radio of "Гостиная")', () => {
+            const ALL_5G_FREQS = [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140].map((c) => 5000 + c * 5);
+            const gostinaya = (channelRange: number[]): FakeAp => {
+                const ap = { ...exampleAp(), mac: '3C-64-CF-69-9A-70', name: 'Гостиная' };
+                ap.config.radioSetting5g = { ...ap.config.radioSetting5g, channelRange };
+                return ap;
+            };
+            const plan = {
+                format: 'netknife-omada/1',
+                kind: 'plan',
+                aps: [{ name: 'Гостиная', mac: '3C-64-CF-69-9A-70', radios: { '5g': { channel: 132 } } }],
+            };
+
+            it('dry-run: channel 132 + freq go into the request, channelRange is filled with the AP channels', async () => {
+                const result = await applyNetknifePlan(createFakeOmada([gostinaya([])]), plan, options);
+                expect(result.results[0]).toMatchObject({
+                    status: 'dry-run',
+                    diff: { '5g': { channel: { from: 36, to: 132 } } },
+                    notes: ['5g: empty channelRange filled with the 19 channels allowed on this AP'],
+                });
+                expect(result.results[0].request?.radioSetting5g).toMatchObject({ channel: '132', freq: 5660, channelRange: ALL_5G_FREQS });
+            });
+
+            it('write: channel 132 is sent and confirmed by the read-back on a controller that enforces channelRange', async () => {
+                const client = createFakeOmada([gostinaya([])], { enforceChannelRange: true });
+                const result = await applyNetknifePlan(client, plan, { ...options, dryRun: false });
+                expect(result.results[0]).toMatchObject({ status: 'applied', diff: { '5g': { channel: { from: 36, to: 132 } } } });
+                const [, body] = client.modifyRadiosConfig.mock.calls[0];
+                expect(body.radioSetting5g).toMatchObject({ channel: '132', freq: 5660, channelRange: ALL_5G_FREQS });
+                const readBack = await client.getRadiosConfig('3C-64-CF-69-9A-70');
+                expect(readBack.radioSetting5g).toMatchObject({ channel: '132', freq: 5660 });
+            });
+
+            it('read-back is not falsely green: a corrected channel is a verification error', async () => {
+                // Non-empty range without 132: sent as read, the controller keeps channel 36.
+                const client = createFakeOmada([gostinaya([5180, 5200])], { enforceChannelRange: true });
+                const result = await applyNetknifePlan(client, plan, { ...options, dryRun: false });
+                expect(client.modifyRadiosConfig.mock.calls[0][1].radioSetting5g).toMatchObject({ channel: '132', channelRange: [5180, 5200] });
+                expect(result.results[0]).toMatchObject({
+                    status: 'error',
+                    error: 'verification after PATCH failed',
+                    mismatches: ['5g.channel: expected 132, got 36'],
+                });
+                expect(result.results[0].notes).toBeUndefined();
+            });
+
+            it('a full or missing channelRange is sent as is; no channel change → range untouched', async () => {
+                const full = await applyApRadioChanges(
+                    createFakeOmada([gostinaya(ALL_5G_FREQS)]),
+                    '3C-64-CF-69-9A-70',
+                    { '5g': { channel: 132 } },
+                    { dryRun: true }
+                );
+                expect(full.notes).toBeUndefined();
+                expect(full.request?.radioSetting5g).toMatchObject({ channelRange: ALL_5G_FREQS });
+
+                const missing = await applyApRadioChanges(
+                    createFakeOmada([exampleAp()]),
+                    exampleAp().mac,
+                    { '5g': { channel: 132 } },
+                    { dryRun: true }
+                );
+                expect(missing.request?.radioSetting5g).not.toHaveProperty('channelRange');
+
+                const powerOnly = await applyApRadioChanges(
+                    createFakeOmada([gostinaya([])]),
+                    '3C-64-CF-69-9A-70',
+                    { '5g': { txPower: 17 } },
+                    { dryRun: true }
+                );
+                expect(powerOnly.request?.radioSetting5g).toMatchObject({ channelRange: [] });
+                expect(powerOnly.notes).toBeUndefined();
+            });
+
+            it('channel "auto" with an empty range also gets the full list', async () => {
+                const result = await applyApRadioChanges(
+                    createFakeOmada([gostinaya([])]),
+                    '3C-64-CF-69-9A-70',
+                    { '5g': { channel: 'auto' } },
+                    { dryRun: true }
+                );
+                expect(result.request?.radioSetting5g).toMatchObject({ channel: '0', channelRange: ALL_5G_FREQS });
             });
         });
 

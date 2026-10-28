@@ -100,8 +100,14 @@ export const netknifePlanSchema = z.object({
             })
             .refine((ap) => Boolean(ap.mac || ap.name), { message: 'each AP needs mac or name' })
     ),
-    // Optional advisory list from Helpdesk ({code, band, aps, text}[]). Never validated strictly and never blocks a write.
+    // Optional advisory list from Helpdesk ({code, band, aps, text}[]). Never validated strictly and never blocks a write;
+    // unknown codes are passed through as is.
     warnings: z.unknown().optional(),
+    // Optional Helpdesk lists of APs that are not in "aps" ({name, mac, reason, text}[]): "unmanaged" — not for writing
+    // (no MAC / not in Omada), "unchanged" — Omada APs left as is. Reported only, never written. Other unknown
+    // top-level fields are ignored (zod strips them).
+    unmanaged: z.unknown().optional(),
+    unchanged: z.unknown().optional(),
 });
 export type NetknifePlan = z.infer<typeof netknifePlanSchema>;
 
@@ -324,7 +330,8 @@ export function mergeRadioChange(
     setting: RadioSetting,
     current: RadioState,
     details: ChannelDetail[],
-    change: CompactRadioChange
+    change: CompactRadioChange,
+    notes?: string[]
 ): RadioSetting {
     const info = BAND_INFO[band];
     const merged: RadioSetting = { ...setting };
@@ -362,6 +369,14 @@ export function mergeRadioChange(
         merged.channel = String(detail.channel);
         merged.freq = detail.freq;
     }
+    // channelRange (custom channel freq list) comes back empty on some APs while the rest of the site has the full
+    // list. The controller corrects a channel that is outside channelRange, so an empty list is not sent with a
+    // channel change: it is filled with every freq the AP allows for this radio (what the other APs already have).
+    // A non-empty range is left as is — if the controller corrects the channel, the read-back reports it.
+    if (change.channel !== undefined && Array.isArray(setting.channelRange) && setting.channelRange.length === 0 && details.length > 0) {
+        merged.channelRange = details.map((d) => d.freq);
+        notes?.push(`${band}: empty channelRange filled with the ${details.length} channels allowed on this AP`);
+    }
     if (change.width !== undefined) merged.channelWidth = change.width === 'auto' ? info.autoWidth : WIDTH_TO_CODE[change.width];
     if (change.txPowerMode !== undefined) merged.txPowerLevel = MODE_TO_LEVEL[change.txPowerMode];
     if (change.txPower !== undefined) merged.txPower = change.txPower;
@@ -387,6 +402,8 @@ export interface ApplyRadioResult {
     verified: boolean;
     request?: Record<string, unknown>;
     mismatches?: string[];
+    /** Adjustments to the Omada setting beyond the requested fields (e.g. an empty channelRange filled). */
+    notes?: string[];
 }
 
 /**
@@ -408,6 +425,7 @@ export async function applyApRadioChanges(
     const before: Partial<Record<RadioBand, RadioState>> = {};
     const expected: Partial<Record<RadioBand, RadioState>> = {};
     const diff: RadiosDiff = {};
+    const notes: string[] = [];
 
     for (const [requestedBand, rawChange] of Object.entries(changes) as [RadioBand, RadioChange | null][]) {
         const change = compactChange(rawChange);
@@ -420,7 +438,8 @@ export async function applyApRadioChanges(
         }
         const details = channelDetailsFor(available, info.radioId);
         const current = radioStateFromSetting(setting as RadioSetting, details);
-        const merged = mergeRadioChange(requestedBand, setting as RadioSetting, current, details, change);
+        const bandNotes: string[] = [];
+        const merged = mergeRadioChange(requestedBand, setting as RadioSetting, current, details, change, bandNotes);
         const target = radioStateFromSetting(merged, details);
         const bandDiff = diffRadio(current, target);
         before[requestedBand] = current;
@@ -428,6 +447,7 @@ export async function applyApRadioChanges(
         if (Object.keys(bandDiff).length > 0) {
             diff[requestedBand] = bandDiff;
             body[info.settingKey] = merged;
+            notes.push(...bandNotes);
         }
     }
 
@@ -438,8 +458,9 @@ export async function applyApRadioChanges(
     if (Object.keys(body).length === 0) {
         return { apMac: mac, dryRun: options.dryRun, before, after: before, diff, verified: true };
     }
+    const extra = notes.length > 0 ? { notes } : {};
     if (options.dryRun) {
-        return { apMac: mac, dryRun: true, before, after: expected, diff, verified: false, request: body };
+        return { apMac: mac, dryRun: true, before, after: expected, diff, verified: false, request: body, ...extra };
     }
 
     logger.info('Omada radio-config PATCH', { apMac: mac, bands: Object.keys(diff), diff: JSON.stringify(diff) });
@@ -461,7 +482,7 @@ export async function applyApRadioChanges(
     }
     const verified = mismatches.length === 0;
     if (!verified) logger.warn('Omada radio-config verification failed', { apMac: mac, mismatches: mismatches.join('; ') });
-    return { apMac: mac, dryRun: false, before, after, diff, verified, ...(verified ? {} : { mismatches }) };
+    return { apMac: mac, dryRun: false, before, after, diff, verified, ...(verified ? {} : { mismatches }), ...extra };
 }
 
 export interface CollectStateOptions {
@@ -522,6 +543,7 @@ export interface ApplyPlanApResult {
     error?: string;
     mismatches?: string[];
     request?: Record<string, unknown>;
+    notes?: string[];
 }
 
 export interface ApplyPlanOptions {
@@ -543,6 +565,14 @@ export interface PlanWarning {
     text: string;
 }
 
+/** An AP from the plan's "unmanaged" / "unchanged" lists (reported, never written). */
+export interface PlanListedAp {
+    name: string | null;
+    mac: string | null;
+    reason: string | null;
+    text: string | null;
+}
+
 export interface ApplyPlanResult {
     format: typeof NETKNIFE_FORMAT;
     kind: 'apply-result';
@@ -551,6 +581,12 @@ export interface ApplyPlanResult {
     warnings: PlanWarning[];
     results: ApplyPlanApResult[];
     summary: Record<ApplyStatus, number>;
+    /** Plan "unmanaged" list: APs not for writing (no MAC / not in Omada). */
+    unmanaged: PlanListedAp[];
+    /** Plan "unchanged" list: Omada APs the plan leaves as is. */
+    unchanged: PlanListedAp[];
+    /** Human-readable lines about the plan lists ("unmanaged: N (не записываются): …"). */
+    report: string[];
 }
 
 /** This many APs (or more) on one channel in one band trigger a warning. */
@@ -739,6 +775,40 @@ export function helpdeskWarnings(raw: unknown): PlanWarning[] {
     });
 }
 
+/** Normalize the optional "unmanaged" / "unchanged" plan lists. Malformed items are kept as far as possible, never rejected. */
+export function planListedAps(raw: unknown): PlanListedAp[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.map((item) => {
+        const record = asRecord(item);
+        const mac = str(record.mac);
+        return {
+            name: str(record.name) ?? (typeof item === 'string' ? item : null),
+            mac: mac ? formatMac(mac) : null,
+            reason: str(record.reason),
+            text: str(record.text),
+        };
+    });
+}
+
+function listedLabel(ap: PlanListedAp): string {
+    return ap.name ?? ap.mac ?? '?';
+}
+
+/** Report lines for the plan's "unmanaged" / "unchanged" lists (empty lists are not reported). */
+export function planListReport(plan: NetknifePlan): string[] {
+    const lines: string[] = [];
+    const unmanaged = planListedAps(plan.unmanaged);
+    const unchanged = planListedAps(plan.unchanged);
+    if (unmanaged.length > 0) lines.push(`unmanaged: ${unmanaged.length} (не записываются): ${unmanaged.map(listedLabel).join(', ')}`);
+    if (unchanged.length > 0) lines.push(`unchanged: ${unchanged.length}: ${unchanged.map(listedLabel).join(', ')}`);
+    return lines;
+}
+
+function notFoundReason(entry: NetknifePlan['aps'][number]): string {
+    if (!entry.mac) return `not on the controller: plan has no MAC and no unique AP named "${entry.name}" on the site — not written`;
+    return `not on the controller: MAC ${formatMac(entry.mac)} not found on the site${entry.name ? ` (nor a unique AP named "${entry.name}")` : ''} — not written`;
+}
+
 /**
  * Apply a netknife-omada/1 plan AP by AP. Backup (state before changes) is always returned.
  *
@@ -746,6 +816,8 @@ export function helpdeskWarnings(raw: unknown): PlanWarning[] {
  * unavailable channel is an error and is never written. With stopOnError (default) the whole plan is
  * blocked — the remaining APs are skipped, so a bad plan is never half-applied; without it the other APs proceed.
  * Warnings (3+ APs on one channel, Helpdesk warnings) are reported in dry-run and write mode but never block.
+ * An AP that is not on the controller (no MAC and no unique name match, or an unknown MAC) is skipped with a reason —
+ * not an error, the rest of the plan proceeds. The plan's "unmanaged" / "unchanged" lists are only reported.
  */
 export async function applyNetknifePlan(client: RadioClient, planInput: unknown, options: ApplyPlanOptions): Promise<ApplyPlanResult> {
     const parseWarnings: PlanWarning[] = [];
@@ -770,8 +842,7 @@ export async function applyNetknifePlan(client: RadioClient, planInput: unknown,
         }
         const ap = findAp(backup, entry.mac, entry.name);
         if (!ap) {
-            results.push({ ...base, status: 'error', error: 'AP not found on site (by mac, then by unique name)' });
-            stopped = options.stopOnError;
+            results.push({ ...base, status: 'skipped', reason: notFoundReason(entry) });
             continue;
         }
         const matched = { ...base, mac: ap.mac, name: ap.name };
@@ -796,7 +867,7 @@ export async function applyNetknifePlan(client: RadioClient, planInput: unknown,
                 siteId: options.siteId,
                 customHeaders: options.customHeaders,
             });
-            const extra = mismatches.length > 0 ? { mismatches } : {};
+            const extra = { ...(mismatches.length > 0 ? { mismatches } : {}), ...(outcome.notes ? { notes: outcome.notes } : {}) };
             if (Object.keys(outcome.diff).length === 0) {
                 results.push({ ...matched, ...extra, status: 'skipped', reason: 'no changes needed', diff: {} });
             } else if (outcome.dryRun) {
@@ -808,6 +879,7 @@ export async function applyNetknifePlan(client: RadioClient, planInput: unknown,
                     diff: outcome.diff,
                     error: 'verification after PATCH failed',
                     mismatches: outcome.mismatches,
+                    ...(outcome.notes ? { notes: outcome.notes } : {}),
                 });
                 stopped = options.stopOnError;
             } else {
@@ -822,5 +894,16 @@ export async function applyNetknifePlan(client: RadioClient, planInput: unknown,
     const summary: Record<ApplyStatus, number> = { applied: 0, skipped: 0, error: 0, 'dry-run': 0 };
     for (const r of results) summary[r.status]++;
     if (warnings.length > 0) logger.warn('NetKnife plan warnings', { dryRun: options.dryRun, warnings: warnings.map((w) => w.text).join(' | ') });
-    return { format: NETKNIFE_FORMAT, kind: 'apply-result', dryRun: options.dryRun, backup, warnings, results, summary };
+    return {
+        format: NETKNIFE_FORMAT,
+        kind: 'apply-result',
+        dryRun: options.dryRun,
+        backup,
+        warnings,
+        results,
+        summary,
+        unmanaged: planListedAps(plan.unmanaged),
+        unchanged: planListedAps(plan.unchanged),
+        report: planListReport(plan),
+    };
 }

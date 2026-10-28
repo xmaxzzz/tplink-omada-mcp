@@ -17,6 +17,11 @@ export interface FakeAp {
 export interface FakeOmadaOptions {
     /** If true, PATCH is accepted but the stored config does not change (verification must fail). */
     ignoreWrites?: boolean;
+    /**
+     * Emulate the controller correcting a fixed channel whose freq is outside the written channelRange:
+     * the PATCH is accepted, but channel/freq keep their previous values.
+     */
+    enforceChannelRange?: boolean;
     site?: Record<string, unknown>;
 }
 
@@ -102,7 +107,15 @@ export function createFakeOmada(aps: FakeAp[], options: FakeOmadaOptions = {}) {
         modifyRadiosConfig: vi.fn(async (mac: string, body: Record<string, unknown>) => {
             const ap = await find(mac);
             if (!options.ignoreWrites) {
-                for (const [key, value] of Object.entries(body)) ap.config[key] = structuredClone(value as Setting);
+                for (const [key, value] of Object.entries(body)) {
+                    const next = structuredClone(value as Setting);
+                    const range = next.channelRange;
+                    if (options.enforceChannelRange && Array.isArray(range) && next.channel !== '0' && !range.includes(next.freq)) {
+                        next.channel = ap.config[key]?.channel;
+                        next.freq = ap.config[key]?.freq;
+                    }
+                    ap.config[key] = next;
+                }
             }
             return undefined;
         }),

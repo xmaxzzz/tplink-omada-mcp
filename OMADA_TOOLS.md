@@ -451,11 +451,12 @@ Format spec: https://github.com/xmaxzzz/NetKnife/blob/HEAD/docs/OMADA-EXCHANGE.m
 |---|---|---|---|---|
 | wireless-radio | `getNetknifeState` | read | Radio state of every AP in the site as `kind: "state"` | ✅ Implemented |
 | wireless-radio | `setApRadioConfig` | write | Change one AP radio (channel / width / TX power / enabled); `dryRun` default `true`; verify after PATCH | ✅ Implemented |
-| wireless-radio | `applyNetknifePlan` | write | Apply a `kind: "plan"` file AP by AP with backup, `current` check, `force`, `stopOnError`; `dryRun` default `true`; channels checked against available list before any write; `warnings` (3+ APs on one channel, Helpdesk `warnings`, numeric strings in `current` normalized) never block; `radios` strict | ✅ Implemented |
+| wireless-radio | `applyNetknifePlan` | write | Apply a `kind: "plan"` file AP by AP with backup, `current` check, `force`, `stopOnError`; `dryRun` default `true`; channels checked against available list before any write; `warnings` (3+ APs on one channel, Helpdesk `warnings`, numeric strings in `current` normalized) never block; `radios` strict; APs not on the controller → `skipped` (no stop); plan `unmanaged` / `unchanged` only reported | ✅ Implemented |
 
 Field mapping (`ApRadioSetting`): width 20→`"2"`, 40→`"3"`, 80→`"5"`, 160→`"7"`, 240→`"9"`, 320→`"10"`, auto→`"4"` (2g) / `"6"` (5g) / `"8"` (6g);
 txPowerMode low/medium/high/custom/auto → `txPowerLevel` 0/1/2/3/4 (`txPower` only with custom);
 channel N → `channel: "N"` + `freq` from available-channel; auto → `channel: "0"` without `freq`.
+An empty `channelRange` is filled with every available-channel `freq` of that radio when the channel is written (the controller corrects a channel outside `channelRange`); a non-empty one is sent as read.
 
 ## Category: wireless-auth
 
