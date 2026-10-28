@@ -44,7 +44,7 @@ A Model Context Protocol (MCP) server that exposes TP-Link Omada controller APIs
 
    Replace the environment variable values with your actual Omada controller credentials.
 
-   To let Claude read and **change** AP radio settings (NetKnife Wi-Fi planning: `getNetknifeState`, `setApRadioConfig`, `applyNetknifePlan`), add the categories explicitly — radio write tools are off by default:
+   To let Claude read and **change** AP radio settings (NetKnife Wi-Fi planning: `getNetknifeState`, `setApRadioConfig`, `setApLoadBalance`, `applyNetknifePlan`), add the categories explicitly — radio write tools are off by default:
 
    ```json
    "-e", "OMADA_TOOL_CATEGORIES=dashboard:r,devices-all:r,wireless-all:r,wireless-radio:rw",
@@ -240,6 +240,7 @@ In client-credentials mode the server already treats `Mcp-Session-Id` as optiona
 | `getRadiosConfig` | Gets per-radio configuration for an AP (channel, power, width). Requires `apMac`. |
 | `getNetknifeState` | Snapshot of every AP's radio settings (channel, width, TX power, allowed channels/widths) as a NetKnife `netknife-omada/1` state file. Category `wireless-radio` (read). |
 | `setApRadioConfig` | **Write.** Change channel / width / TX power / on-off of one AP radio (`band` 2g/5g/5g1/5g2/6g). Validates against available channels, re-reads and verifies. `dryRun` defaults to `true`. Category `wireless-radio` (write). |
+| `setApLoadBalance` | **Write.** RSSI Threshold (`rssiEnable` / `threshold`, −95…−40 dBm) or max clients (`maxClientsEnable` / `maxClients`, 1–512) of one AP band (`band` 2g/5g/5g2/6g). Sends the whole current config back with only the passed fields changed, re-reads and verifies: `ignored` lists fields the controller did not take (`verified: false`), `sideEffects` lists untouched fields that changed. Warns on a threshold above −70 dBm and on RSSI cut-off at 2.4 GHz (IoT). `dryRun` defaults to `true`. Category `wireless-radio` (write). |
 | `applyNetknifePlan` | **Write.** Apply a NetKnife `netknife-omada/1` plan AP by AP (match by MAC, name fallback), radios only. Returns a state backup and per-AP results. `dryRun` defaults to `true`, `force` / `stopOnError` control mismatches and failures. Category `wireless-radio` (write). |
 | `getApVlanConfig` | Get VLAN configuration for an access point, including management VLAN and per-SSID VLAN tagging settings. |
 | `getMeshStatistics` | Gets mesh link statistics for an AP. Requires `apMac`. |
@@ -528,6 +529,7 @@ In client-credentials mode the server already treats `Mcp-Session-Id` as optiona
 | `getGatewayPorts` | Get port info for a specific gateway.                     | `getGatewayPorts` |
 | `getAp` | Get detailed info for a specific access point.            | `getApDetail` |
 | `modifyRadiosConfig` | Modify AP radio config (PATCH `/aps/{apMac}/radio-config`). | `setApRadioConfig`, `applyNetknifePlan` |
+| `modifyApLoadBalanceConfig` | Modify AP load balance config (PATCH `/aps/{apMac}/load-balance`). RSSI fields are taken from the 6.x GET response, not from the spec. | `setApLoadBalance` |
 | `getApRadios` | Get radio info for a specific access point.               | `getApRadios` |
 | `getStackPorts` | Get port info for a switch stack.                         | `getStackPorts` |
 | `getGridPendingDevices` | List devices pending adoption in a site.                  | `listPendingDevices` |

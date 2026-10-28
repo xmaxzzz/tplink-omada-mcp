@@ -1,4 +1,12 @@
-import type { CustomHeaders, GetDeviceStatsOptions, OmadaApiResponse, OmadaDeviceInfo, OmadaDeviceStats, OswStackDetail } from '../types/index.js';
+import type {
+    ApLoadBalanceConfig,
+    CustomHeaders,
+    GetDeviceStatsOptions,
+    OmadaApiResponse,
+    OmadaDeviceInfo,
+    OmadaDeviceStats,
+    OswStackDetail,
+} from '../types/index.js';
 
 import type { RequestHandler } from './request.js';
 import type { SiteOperations } from './site.js';
@@ -599,6 +607,23 @@ export class DeviceOperations {
         const resolvedSiteId = this.site.resolveSiteId(siteId);
         const path = this.buildPath(`/sites/${encodeURIComponent(resolvedSiteId)}/aps/${encodeURIComponent(apMac)}/load-balance`);
         const response = await this.request.get<OmadaApiResponse<unknown>>(path, undefined, customHeaders);
+        return this.request.ensureSuccess(response);
+    }
+
+    /**
+     * Modify AP load balance config (PATCH, write).
+     * OperationId: modifyApLoadBalanceConfig
+     */
+    public async modifyApLoadBalanceConfig(
+        apMac: string,
+        config: ApLoadBalanceConfig,
+        siteId?: string,
+        customHeaders?: CustomHeaders
+    ): Promise<unknown> {
+        if (!apMac) throw new Error('An apMac must be provided.');
+        const resolvedSiteId = this.site.resolveSiteId(siteId);
+        const path = this.buildPath(`/sites/${encodeURIComponent(resolvedSiteId)}/aps/${encodeURIComponent(apMac)}/load-balance`);
+        const response = await this.request.patch<OmadaApiResponse<unknown>>(path, config, customHeaders);
         return this.request.ensureSuccess(response);
     }
 

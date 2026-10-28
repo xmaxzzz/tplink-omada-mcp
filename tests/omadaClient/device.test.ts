@@ -872,6 +872,24 @@ describe('omadaClient/device', () => {
         });
     });
 
+    describe('modifyApLoadBalanceConfig', () => {
+        it('should PATCH AP load balance config', async () => {
+            const body = { maxClientsEnable2g: false, maxClients2g: 1, rssiEnable5g: true, threshold5g: -75 };
+            (mockRequest as unknown as { patch: ReturnType<typeof vi.fn> }).patch = vi.fn().mockResolvedValue({ errorCode: 0 });
+            const result = await deviceOps.modifyApLoadBalanceConfig('AA-BB-CC-DD-EE-FF', body, 'site-1', { 'X-Test': '1' });
+            expect(result).toBeUndefined();
+            expect((mockRequest as unknown as { patch: ReturnType<typeof vi.fn> }).patch).toHaveBeenCalledWith(
+                '/api/sites/site-1/aps/AA-BB-CC-DD-EE-FF/load-balance',
+                body,
+                { 'X-Test': '1' }
+            );
+        });
+
+        it('should throw if apMac is empty', async () => {
+            await expect(deviceOps.modifyApLoadBalanceConfig('', {}, 'site-1')).rejects.toThrow('An apMac must be provided.');
+        });
+    });
+
     describe('getSitesApsOfdma', () => {
         it('should return AP OFDMA config', async () => {
             await testMacMethod('getSitesApsOfdma', 'AP-01', '/api/sites/site-1/aps/AP-01/ofdma', 'An apMac must be provided.');

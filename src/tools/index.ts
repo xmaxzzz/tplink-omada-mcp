@@ -330,6 +330,7 @@ import { registerListUpgradeOverviewFirmwaresTool } from './listUpgradeOverviewF
 import { registerListWireguardTool } from './listWireguard.js';
 import { registerListWireguardPeersTool } from './listWireguardPeers.js';
 import { registerSearchDevicesTool } from './searchDevices.js';
+import { registerSetApLoadBalanceTool } from './setApLoadBalance.js';
 import { registerSetApRadioConfigTool } from './setApRadioConfig.js';
 import { registerSetClientRateLimitTool } from './setClientRateLimit.js';
 import { registerSetClientRateLimitProfileTool } from './setClientRateLimitProfile.js';
@@ -551,6 +552,7 @@ const TOOL_REGISTRY: ToolEntry[] = [
     { fn: registerGetRetryAndDroppedRateTool, category: 'wireless-radio', permission: 'read' },
     { fn: registerGetNetknifeStateTool, category: 'wireless-radio', permission: 'read' },
     { fn: registerSetApRadioConfigTool, category: 'wireless-radio', permission: 'write' },
+    { fn: registerSetApLoadBalanceTool, category: 'wireless-radio', permission: 'write' },
     { fn: registerApplyNetknifePlanTool, category: 'wireless-radio', permission: 'write' },
 
     // --- Wireless auth ---
