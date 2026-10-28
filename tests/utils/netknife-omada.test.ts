@@ -23,6 +23,7 @@ import {
     radioStateFromSetting,
     radiosFromConfig,
     resolveBand,
+    settingForWrite,
     toIsoCountry,
 } from '../../src/utils/netknife-omada.js';
 import { createFakeOmada, exampleAp, exampleAvailableChannels, type FakeAp } from '../helpers/fakeOmada.js';
@@ -967,6 +968,107 @@ describe('utils/netknife-omada', () => {
             client.getRadiosConfig.mockResolvedValueOnce(structuredClone(exampleAp().config)).mockRejectedValueOnce('down');
             const result = await applyNetknifePlan(client, plan, options);
             expect(result.results[0]).toMatchObject({ status: 'error', error: 'down' });
+        });
+    });
+
+    // Live controller "Alie Parusa" (Omada 6.3.0.45): radio-config returns `channel` as the channel index
+    // ("17" for 132), a power-only write echoed that index back into the PATCH.
+    describe('unchanged channel is not written back as an index', () => {
+        const NO_100 = [36, 40, 44, 48, 52, 56, 60, 64, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140];
+
+        /** exampleAp() as the real controller returns it: channel = index, plus freq. */
+        function indexedAp(band: '2g' | '5g', channel: number, channels5g?: number[]): FakeAp {
+            const ap = exampleAp();
+            if (channels5g) {
+                (ap.available as { radioId: number; apChannelDetailList: unknown[] }[])[1].apChannelDetailList = channels5g.map((c, i) => ({
+                    channel: c,
+                    freq: 5000 + c * 5,
+                    index: i + 1,
+                    availableChannelWidthList: [20, 40, 80],
+                }));
+            }
+            const freq = band === '2g' ? 2407 + channel * 5 : 5000 + channel * 5;
+            const detail = channelDetailsFor(ap.available, band === '2g' ? 0 : 1).find((d) => d.freq === freq);
+            const key = band === '2g' ? 'radioSetting2g' : 'radioSetting5g';
+            ap.config[key] = { ...ap.config[key], channel: String(detail?.index), freq };
+            return ap;
+        }
+
+        it.each([
+            { band: '5g' as const, channel: 132, index: '17', list: undefined },
+            { band: '5g' as const, channel: 104, index: '9', list: NO_100 },
+            { band: '2g' as const, channel: 6, index: '6', list: undefined },
+            { band: '2g' as const, channel: 11, index: '11', list: undefined },
+        ])('$band channel $channel (index $index): txPower only → no channel in PATCH, channel kept', async ({ band, channel, index, list }) => {
+            const ap = indexedAp(band, channel, list);
+            const key = band === '2g' ? 'radioSetting2g' : 'radioSetting5g';
+            const freq = ap.config[key].freq;
+            expect(ap.config[key].channel).toBe(index);
+            const client = createFakeOmada([ap], { channelIndex: true });
+
+            const dry = await applyApRadioChanges(client, ap.mac, { [band]: { txPower: 17 } }, { dryRun: true });
+            expect(dry.before[band]?.channel).toBe(channel);
+            expect(dry.diff).toEqual({ [band]: { txPower: { from: band === '2g' ? 14 : 20, to: 17 } } });
+            expect(dry.request?.[key]).not.toHaveProperty('channel');
+            expect(dry.request?.[key]).toMatchObject({ freq, txPower: 17 });
+
+            const result = await applyApRadioChanges(client, ap.mac, { [band]: { txPower: 17 } }, { dryRun: false });
+            const [, body] = client.modifyRadiosConfig.mock.calls[0];
+            expect(body[key]).not.toHaveProperty('channel');
+            expect(body[key]).toMatchObject({ freq, txPower: 17 });
+            expect(result).toMatchObject({ verified: true, after: { [band]: { channel, txPower: 17 } } });
+            expect(result.mismatches).toBeUndefined();
+            expect(ap.config[key]).toMatchObject({ channel: index, freq });
+        });
+
+        it('a channel the controller moved although not requested → verified:false with a message', async () => {
+            const ap = indexedAp('5g', 132);
+            const client = createFakeOmada([ap], { channelIndex: true });
+            client.modifyRadiosConfig.mockImplementationOnce(() => {
+                ap.config.radioSetting5g = { ...ap.config.radioSetting5g, channel: '1', freq: 5180, txPower: 17 };
+                return Promise.resolve(undefined);
+            });
+            const result = await applyApRadioChanges(client, ap.mac, { '5g': { txPower: 17 } }, { dryRun: false });
+            expect(result.verified).toBe(false);
+            expect(result.mismatches).toEqual(['5g.channel: not requested, expected unchanged 132, got 36']);
+        });
+
+        it('applyNetknifePlan: channel null → the index is not sent, the channel stays; a moved channel is an error', async () => {
+            const ap = indexedAp('5g', 132);
+            const plan = {
+                format: 'netknife-omada/1',
+                kind: 'plan',
+                aps: [{ mac: ap.mac, radios: { '5g': { channel: null, width: null, txPower: 17 }, '2g': { channel: null } } }],
+            };
+            const client = createFakeOmada([ap], { channelIndex: true });
+            const result = await applyNetknifePlan(client, plan, { dryRun: false, force: false, stopOnError: true });
+            expect(result.results[0]).toMatchObject({ status: 'applied', diff: { '5g': { txPower: { from: 20, to: 17 } } } });
+            const [, body] = client.modifyRadiosConfig.mock.calls[0];
+            expect(Object.keys(body)).toEqual(['radioSetting5g']);
+            expect(body.radioSetting5g).not.toHaveProperty('channel');
+            expect(ap.config.radioSetting5g).toMatchObject({ channel: '17', freq: 5660, txPower: 17 });
+
+            const moved = indexedAp('5g', 132);
+            const movedClient = createFakeOmada([moved], { channelIndex: true });
+            movedClient.modifyRadiosConfig.mockImplementationOnce(() => {
+                moved.config.radioSetting5g = { ...moved.config.radioSetting5g, channel: '0', txPower: 17 };
+                return Promise.resolve(undefined);
+            });
+            const failed = await applyNetknifePlan(movedClient, plan, { dryRun: false, force: false, stopOnError: true });
+            expect(failed.results[0]).toMatchObject({
+                status: 'error',
+                error: 'verification after PATCH failed',
+                mismatches: ['5g.channel: not requested, expected unchanged 132, got auto'],
+            });
+        });
+
+        it('settingForWrite: requested channel and auto are sent as is, an unchanged fixed channel is dropped', () => {
+            const fixed = { channel: '17', freq: 5660, txPower: 20 };
+            expect(settingForWrite(fixed, { txPower: 17 })).toEqual({ freq: 5660, txPower: 20 });
+            expect(fixed).toHaveProperty('channel', '17');
+            expect(settingForWrite(fixed, { channel: 132 })).toBe(fixed);
+            const auto = { channel: '0', txPower: 20 };
+            expect(settingForWrite(auto, { txPower: 17 })).toBe(auto);
         });
     });
 });

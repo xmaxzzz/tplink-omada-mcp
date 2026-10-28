@@ -14,6 +14,8 @@ import { logger } from './logger.js';
  *   "auto" → "4" (2g, RADIO_40_20), "6" (5g, RADIO_80_40_20), "8" (6g, RADIO_160_80_40_20).
  * - txPowerMode → txPowerLevel: low 0, medium 1, high 2, custom 3, auto 4. txPower is only sent with custom.
  * - channel → channel (string) + freq taken from the AP's available-channel list; "auto" → channel "0", freq removed.
+ *   radio-config returns `channel` as a channel index (ApChannelDetail.index), so it is decoded via freq; when the
+ *   channel is not changed only freq is written back (see settingForWrite).
  */
 
 export const NETKNIFE_FORMAT = 'netknife-omada/1';
@@ -383,6 +385,21 @@ export function mergeRadioChange(
     return merged;
 }
 
+/**
+ * The Omada setting as it goes into the PATCH body. radio-config `channel` is a channel *index*
+ * (ApChannelDetail.index, e.g. "17" for channel 132), not the channel number, while `freq` is authoritative:
+ * "the freq and channel fields should be corresponding, otherwise the channel will be corrected based on freq".
+ * An unchanged fixed channel is therefore not echoed back: the index read by GET is dropped and only the current
+ * freq is sent, so a write that does not touch the channel never depends on the index ↔ channel mapping.
+ * Auto ("0") is kept as is — without it the current freq could pin the radio to its present channel.
+ */
+export function settingForWrite(merged: RadioSetting, change: CompactRadioChange): RadioSetting {
+    if (change.channel !== undefined || !asNumber(merged.channel)) return merged;
+    const body: RadioSetting = { ...merged };
+    delete body.channel;
+    return body;
+}
+
 // ---------------------------------------------------------------------------
 // Client-backed operations
 // ---------------------------------------------------------------------------
@@ -446,7 +463,7 @@ export async function applyApRadioChanges(
         expected[requestedBand] = target;
         if (Object.keys(bandDiff).length > 0) {
             diff[requestedBand] = bandDiff;
-            body[info.settingKey] = merged;
+            body[info.settingKey] = settingForWrite(merged, change);
             notes.push(...bandNotes);
         }
     }
@@ -478,6 +495,11 @@ export async function applyApRadioChanges(
         for (const [field, { to }] of Object.entries(diff[requestedBand] ?? {})) {
             const actual = state[field as keyof RadioState];
             if (!sameValue(actual, to)) mismatches.push(`${requestedBand}.${field}: expected ${String(to)}, got ${String(actual)}`);
+        }
+        // A channel that was not requested must survive the write (the PATCH carries only freq for it).
+        const from = before[requestedBand]?.channel;
+        if (diff[requestedBand] && !diff[requestedBand].channel && !sameValue(state.channel, from)) {
+            mismatches.push(`${requestedBand}.channel: not requested, expected unchanged ${String(from)}, got ${String(state.channel)}`);
         }
     }
     const verified = mismatches.length === 0;

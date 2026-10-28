@@ -22,7 +22,21 @@ export interface FakeOmadaOptions {
      * the PATCH is accepted, but channel/freq keep their previous values.
      */
     enforceChannelRange?: boolean;
+    /**
+     * Emulate the real controller: radio-config `channel` is the channel index from the available-channel list,
+     * and a written freq wins over the written channel (the channel is corrected based on freq).
+     */
+    channelIndex?: boolean;
     site?: Record<string, unknown>;
+}
+
+/** The ApChannelDetail entry for a freq in an available-channel response. */
+function detailByFreq(available: unknown, freq: unknown): Setting | undefined {
+    for (const radio of available as { apChannelDetailList: Setting[] }[]) {
+        const detail = radio.apChannelDetailList.find((d) => d.freq === freq);
+        if (detail) return detail;
+    }
+    return undefined;
 }
 
 const CHANNELS_5G = [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140];
@@ -113,6 +127,12 @@ export function createFakeOmada(aps: FakeAp[], options: FakeOmadaOptions = {}) {
                     if (options.enforceChannelRange && Array.isArray(range) && next.channel !== '0' && !range.includes(next.freq)) {
                         next.channel = ap.config[key]?.channel;
                         next.freq = ap.config[key]?.freq;
+                    }
+                    // A channel left out of the PATCH keeps the stored one (freq still corrects it, see channelIndex).
+                    next.channel ??= ap.config[key]?.channel;
+                    if (options.channelIndex) {
+                        const detail = next.channel !== '0' ? detailByFreq(ap.available, next.freq) : undefined;
+                        if (detail) next.channel = String(detail.index);
                     }
                     ap.config[key] = next;
                 }
