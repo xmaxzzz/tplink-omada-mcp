@@ -74,6 +74,9 @@ describe('tools/setApLoadBalance', () => {
             expect(mockServer.registerTool).toHaveBeenCalledWith('setApLoadBalance', expect.any(Object), expect.any(Function));
             expect(toolConfig.description).toContain('dryRun=true first');
             expect(toolConfig.description).toContain('On 2.4 GHz IoT clients tolerate RSSI cut-off badly');
+            expect(toolConfig.description).toContain('"ignored" lists fields the controller did not accept via OpenAPI');
+            expect(toolConfig.description).toContain('sideEffects');
+            expect(toolConfig.description).toContain('PATCH is sent even if nothing changes');
             const schema = z.object(toolConfig.inputSchema);
             expect(schema.parse({ apMac: MAC, band: '5g', threshold: -75 }).dryRun).toBe(true);
         });
@@ -93,13 +96,13 @@ describe('tools/setApLoadBalance', () => {
     });
 
     describe('dry run', () => {
-        it('returns before/after/diff with the full body and does not PATCH', async () => {
+        it('returns band before/after (flag next to value), diff and the full body; does not PATCH', async () => {
             const client = fakeClient();
             const body = await call(client, { band: '5g', threshold: -75 });
             expect(body).toMatchObject({ apMac: MAC, band: '5g', dryRun: true, verified: false, diff: { threshold5g: { from: -70, to: -75 } } });
-            expect(body.after).toEqual({ ...lbConfig(), threshold5g: -75 });
-            expect(body.request).toEqual(body.after);
-            expect(body.before).toEqual(lbConfig());
+            expect(body.before).toEqual({ rssiEnable5g: true, threshold5g: -70, maxClientsEnable5g: false, maxClients5g: 1 });
+            expect(body.after).toEqual({ rssiEnable5g: true, threshold5g: -75, maxClientsEnable5g: false, maxClients5g: 1 });
+            expect(body.request).toEqual({ ...lbConfig(), threshold5g: -75 });
             expect(body.warnings).toBeUndefined();
             expect(client.modifyApLoadBalanceConfig).not.toHaveBeenCalled();
             expect(client.getSitesApsLoadBalance).toHaveBeenCalledTimes(1);
@@ -117,7 +120,8 @@ describe('tools/setApLoadBalance', () => {
             const client = fakeClient();
             const body = await call(client, { band: '5g', rssiEnable: true, threshold: -75, dryRun: false, siteId: 'site-1' });
             expect(client.modifyApLoadBalanceConfig).toHaveBeenCalledWith(MAC, { ...lbConfig(), threshold5g: -75 }, 'site-1', undefined);
-            expect(body).toMatchObject({ dryRun: false, verified: true, after: { threshold5g: -75, threshold2g: -80, rssiEnable2g: true } });
+            expect(body).toMatchObject({ dryRun: false, verified: true, after: { rssiEnable5g: true, threshold5g: -75 } });
+            expect(body.after.threshold2g).toBeUndefined();
             expect(body.diff).toEqual({ threshold5g: { from: -70, to: -75 } });
             expect(body.ignored).toBeUndefined();
             expect(body.sideEffects).toBeUndefined();
@@ -151,7 +155,8 @@ describe('tools/setApLoadBalance', () => {
             }));
             const body = await call(client, { band: '5g', threshold: -75, dryRun: false });
             expect(body.verified).toBe(false);
-            expect(body.ignored).toEqual(['threshold5g: requested -75, controller has -70']);
+            expect(body.ignored).toEqual(['threshold5g']);
+            expect(body.mismatches).toEqual({ threshold5g: { expected: -75, actual: -70 } });
             expect(loggerModule.logger.warn).toHaveBeenCalledWith('Omada load-balance verification failed', expect.any(Object));
         });
 
@@ -167,12 +172,67 @@ describe('tools/setApLoadBalance', () => {
         });
     });
 
+    describe('flag off, threshold set (Maxim: threshold filled everywhere, rssiEnable not on every AP)', () => {
+        const flagOff = () => ({ ...lbConfig(), rssiEnable5g: false, threshold5g: -70 });
+
+        it('a) rssiEnable:true + threshold:-75 — dryRun shows both in diff, write verifies', async () => {
+            const dry = await call(fakeClient(flagOff()), { band: '5g', rssiEnable: true, threshold: -75 });
+            expect(dry.diff).toEqual({ rssiEnable5g: { from: false, to: true }, threshold5g: { from: -70, to: -75 } });
+            expect(dry.before).toMatchObject({ rssiEnable5g: false, threshold5g: -70 });
+            expect(dry.after).toMatchObject({ rssiEnable5g: true, threshold5g: -75 });
+
+            const client = fakeClient(flagOff());
+            const body = await call(client, { band: '5g', rssiEnable: true, threshold: -75, dryRun: false });
+            expect(client.modifyApLoadBalanceConfig).toHaveBeenCalledWith(MAC, { ...lbConfig(), threshold5g: -75 }, undefined, undefined);
+            expect(body).toMatchObject({ verified: true, after: { rssiEnable5g: true, threshold5g: -75 } });
+            expect(body.ignored).toBeUndefined();
+        });
+
+        it('b) threshold alone — error names the existing value and asks for rssiEnable: true', async () => {
+            const client = fakeClient(flagOff());
+            await expect(call(client, { band: '5g', threshold: -75 })).rejects.toThrow(
+                '5g: the threshold value is already set (-70), but RSSI threshold on 5g is off on AP 3C-64-CF-69-9A-64 — pass rssiEnable: true'
+            );
+            expect(client.modifyApLoadBalanceConfig).not.toHaveBeenCalled();
+        });
+
+        it('c) flag applied, value not — verified=false, ignored=[threshold5g]', async () => {
+            const client = fakeClient(flagOff(), (bodyIn, stored) => ({ ...bodyIn, threshold5g: stored.threshold5g }));
+            const body = await call(client, { band: '5g', rssiEnable: true, threshold: -75, dryRun: false });
+            expect(body.verified).toBe(false);
+            expect(body.ignored).toEqual(['threshold5g']);
+            expect(body.after).toMatchObject({ rssiEnable5g: true, threshold5g: -70 });
+        });
+
+        it('d) value applied, flag not — verified=false, ignored=[rssiEnable5g]', async () => {
+            const client = fakeClient(flagOff(), (bodyIn, stored) => ({ ...bodyIn, rssiEnable5g: stored.rssiEnable5g }));
+            const body = await call(client, { band: '5g', rssiEnable: true, threshold: -75, dryRun: false });
+            expect(body.verified).toBe(false);
+            expect(body.ignored).toEqual(['rssiEnable5g']);
+            expect(body.mismatches).toEqual({ rssiEnable5g: { expected: true, actual: false } });
+        });
+
+        it('checks the flag even when only threshold was passed and the controller turned it off', async () => {
+            const client = fakeClient(lbConfig(), (bodyIn) => ({ ...bodyIn, rssiEnable5g: false }));
+            const body = await call(client, { band: '5g', threshold: -75, dryRun: false });
+            expect(body.ignored).toEqual(['rssiEnable5g']);
+        });
+    });
+
     describe('guards', () => {
         it('rejects threshold when RSSI threshold is off and not turned on', async () => {
             const client = fakeClient({ ...lbConfig(), rssiEnable5g: false });
-            await expect(call(client, { band: '5g', threshold: -75 })).rejects.toThrow('threshold needs RSSI threshold on');
-            await expect(call(client, { band: '5g', rssiEnable: false, threshold: -75 })).rejects.toThrow('pass rssiEnable: true');
+            await expect(call(client, { band: '5g', rssiEnable: false, threshold: -75 })).rejects.toThrow('threshold with rssiEnable: false');
+            const { threshold5g: _t, ...noValue } = { ...lbConfig(), rssiEnable5g: false };
+            await expect(call(fakeClient(noValue), { band: '5g', threshold: -75 })).rejects.toThrow(
+                'there is no threshold value yet, but RSSI threshold on 5g is off'
+            );
             expect(client.modifyApLoadBalanceConfig).not.toHaveBeenCalled();
+        });
+
+        it('accepts threshold alone when the flag is already on in the current config', async () => {
+            const body = await call(fakeClient(), { band: '5g', threshold: -75 });
+            expect(body.diff).toEqual({ threshold5g: { from: -70, to: -75 } });
         });
 
         it('accepts threshold together with rssiEnable: true when it is off', async () => {

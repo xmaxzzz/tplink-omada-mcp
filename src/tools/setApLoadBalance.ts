@@ -39,14 +39,18 @@ export interface ApplyLoadBalanceResult {
     apMac: string;
     band: LoadBalanceBand;
     dryRun: boolean;
+    /** The band's fields before the change — flag next to value, e.g. `{rssiEnable5g: false, threshold5g: -70, ...}`. */
     before: ApLoadBalanceConfig;
+    /** The band's fields after the change (dryRun: expected; write: re-read from the controller). */
     after: ApLoadBalanceConfig;
     diff: Record<string, { from: unknown; to: unknown }>;
     verified: boolean;
     /** Full body sent (or, with dryRun, to be sent) with PATCH. */
     request?: ApLoadBalanceConfig;
-    /** Requested fields the controller did not take (re-read value differs). */
+    /** Field names the controller did not take via OpenAPI (re-read value differs from the expected one). */
     ignored?: string[];
+    /** Expected vs re-read value of each ignored field. */
+    mismatches?: Record<string, { expected: unknown; actual: unknown }>;
     /** Fields we did not touch that changed between the two GETs. */
     sideEffects?: Record<string, { from: unknown; to: unknown }>;
     warnings?: string[];
@@ -68,13 +72,23 @@ function asConfig(value: unknown, mac: string): ApLoadBalanceConfig {
     return value as ApLoadBalanceConfig;
 }
 
+/** The band's own fields (flag next to value), only those the controller returns or we set. */
+function bandSlice(config: ApLoadBalanceConfig, keys: ReturnType<typeof bandKeys>): ApLoadBalanceConfig {
+    const slice: Record<string, unknown> = {};
+    for (const key of [keys.rssiEnable, keys.threshold, keys.maxClientsEnable, keys.maxClients] as string[]) {
+        if (key in config) slice[key] = config[key];
+    }
+    return slice;
+}
+
 function same(a: unknown, b: unknown): boolean {
     return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /**
  * Read load-balance, merge the requested per-band fields into the full GET object (a partial PATCH may reset the
- * rest), PATCH unless dryRun, re-read and verify each requested field. A request equal to the current config is
+ * rest), PATCH unless dryRun, re-read and verify each requested field — the RSSI flag and the threshold value
+ * separately (a threshold also expects the flag on). A request equal to the current config is
  * still written when dryRun=false (a no-op PATCH, useful to check the controller keeps everything as is).
  */
 export async function applyApLoadBalanceChange(
@@ -110,8 +124,13 @@ export async function applyApLoadBalanceChange(
     ) {
         throw new Error(`${band}: the controller returns no max-clients fields (${keys.maxClientsEnable}/${keys.maxClients}) for AP ${mac}`);
     }
-    if (change.threshold !== undefined && (change.rssiEnable ?? before[keys.rssiEnable]) !== true) {
-        throw new Error(`${band}: threshold needs RSSI threshold on — pass rssiEnable: true (it is off on AP ${mac})`);
+    if (change.threshold !== undefined && change.rssiEnable === false) {
+        throw new Error(`${band}: threshold with rssiEnable: false — the value only applies with RSSI threshold on, pass rssiEnable: true`);
+    }
+    if (change.threshold !== undefined && change.rssiEnable === undefined && before[keys.rssiEnable] !== true) {
+        const current = before[keys.threshold];
+        const has = typeof current === 'number' ? `the threshold value is already set (${current})` : 'there is no threshold value yet';
+        throw new Error(`${band}: ${has}, but RSSI threshold on ${band} is off on AP ${mac} — pass rssiEnable: true`);
     }
     if (change.maxClientsEnable === true && change.maxClients === undefined && typeof before[keys.maxClients] !== 'number') {
         throw new Error(`${band}: maxClientsEnable: true needs maxClients (AP ${mac} has no current value)`);
@@ -138,33 +157,49 @@ export async function applyApLoadBalanceChange(
     const extra = warnings.length > 0 ? { warnings } : {};
 
     if (options.dryRun) {
-        return { apMac: mac, band, dryRun: true, before, after: body, diff, verified: false, request: body, ...extra };
+        return {
+            apMac: mac,
+            band,
+            dryRun: true,
+            before: bandSlice(before, keys),
+            after: bandSlice(body, keys),
+            diff,
+            verified: false,
+            request: body,
+            ...extra,
+        };
     }
 
     logger.info('Omada load-balance PATCH', { apMac: mac, band, diff: JSON.stringify(diff) });
     await client.modifyApLoadBalanceConfig(mac, body, siteId, customHeaders);
     const after = asConfig(await client.getSitesApsLoadBalance(mac, siteId, customHeaders), mac);
 
+    // A threshold only means something with the flag on, so the flag is checked too even if it was already on.
+    const expected: Record<string, unknown> = change.threshold !== undefined ? { [keys.rssiEnable]: true, ...requested } : requested;
     const ignored: string[] = [];
-    for (const [key, value] of Object.entries(requested)) {
-        if (!same(after[key], value)) ignored.push(`${key}: requested ${String(value)}, controller has ${String(after[key])}`);
+    const mismatches: Record<string, { expected: unknown; actual: unknown }> = {};
+    for (const [key, value] of Object.entries(expected)) {
+        if (!same(after[key], value)) {
+            ignored.push(key);
+            mismatches[key] = { expected: value, actual: after[key] };
+        }
     }
     const sideEffects: Record<string, { from: unknown; to: unknown }> = {};
     for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
         if (!(key in requested) && !same(before[key], after[key])) sideEffects[key] = { from: before[key], to: after[key] };
     }
     const verified = ignored.length === 0;
-    if (!verified) logger.warn('Omada load-balance verification failed', { apMac: mac, ignored: ignored.join('; ') });
+    if (!verified) logger.warn('Omada load-balance verification failed', { apMac: mac, mismatches: JSON.stringify(mismatches) });
     return {
         apMac: mac,
         band,
         dryRun: false,
-        before,
-        after,
+        before: bandSlice(before, keys),
+        after: bandSlice(after, keys),
         diff,
         verified,
         request: body,
-        ...(verified ? {} : { ignored }),
+        ...(verified ? {} : { ignored, mismatches }),
         ...(Object.keys(sideEffects).length > 0 ? { sideEffects } : {}),
         ...extra,
     };
@@ -208,7 +243,7 @@ export function registerSetApLoadBalanceTool(server: McpServer, client: OmadaCli
         'setApLoadBalance',
         {
             description:
-                'WRITE: change RSSI Threshold (rssiEnable/threshold) or max clients of one AP band (PATCH load-balance). Reads the current config and sends it back whole with only the passed fields changed, then re-reads and verifies; fields the controller ignored are listed in "ignored" (verified=false), untouched fields that changed in "sideEffects". On 2.4 GHz IoT clients tolerate RSSI cut-off badly. ALWAYS call with dryRun=true first (the default), show the diff to a human, and only then repeat with dryRun=false. Returns {before, after, diff, verified}.',
+                'WRITE: change RSSI Threshold (rssiEnable/threshold) or max clients of one AP band (PATCH load-balance). Reads the current config and sends it back whole with only the passed fields changed, then re-reads and verifies. A threshold needs rssiEnable: true in the call unless the flag is already on. Returns {before, after, diff, verified, ignored, mismatches, sideEffects}: before/after show the band\'s flag next to its value; verified checks the flag and the value separately; "ignored" lists fields the controller did not accept via OpenAPI (verified=false); "sideEffects" lists untouched fields that changed. With dryRun=false the PATCH is sent even if nothing changes (a no-op write). On 2.4 GHz IoT clients tolerate RSSI cut-off badly. ALWAYS call with dryRun=true first (the default), show the diff to a human, and only then repeat with dryRun=false.',
             inputSchema: inputSchema.shape,
         },
         wrapToolHandler(
