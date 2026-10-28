@@ -1,0 +1,36 @@
+{
+    "format": "netknife-omada/1",
+    "kind": "state",
+    "site": "Алые паруса",
+    "omadaSite": "Alie Parusa",
+    "generated": "2026-10-22T15:50:00+03:00",
+    "country": "RU",
+    "aps": [
+        {
+            "name": "Кухня",
+            "mac": "3C-64-CF-69-9A-64",
+            "ip": "192.168.115.208",
+            "model": "EAP613",
+            "radios": {
+                "2g": {
+                    "enabled": true,
+                    "channel": 6,
+                    "width": 20,
+                    "txPowerMode": "custom",
+                    "txPower": 14,
+                    "channels": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+                    "widths": [20, 40]
+                },
+                "5g": {
+                    "enabled": true,
+                    "channel": 36,
+                    "width": 40,
+                    "txPowerMode": "custom",
+                    "txPower": 20,
+                    "channels": [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140],
+                    "widths": [20, 40, 80]
+                }
+            }
+        }
+    ]
+}

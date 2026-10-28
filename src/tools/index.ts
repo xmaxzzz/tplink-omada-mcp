@@ -3,6 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolCategory, ToolPermission } from '../config.js';
 import type { OmadaClient } from '../omadaClient/index.js';
 import { logger } from '../utils/logger.js';
+import { registerApplyNetknifePlanTool } from './applyNetknifePlan.js';
 import { registerDisableClientRateLimitTool } from './disableClientRateLimit.js';
 import { registerGetAccessControlTool } from './getAccessControl.js';
 import { registerGetAclConfigTypeSettingTool } from './getAclConfigTypeSetting.js';
@@ -156,6 +157,7 @@ import { registerGetMeshSettingTool } from './getMeshSetting.js';
 import { registerGetMeshStatisticsTool } from './getMeshStatistics.js';
 import { registerGetMfaStatusTool } from './getMfaStatus.js';
 import { registerGetMulticastRateLimitTool } from './getMulticastRateLimit.js';
+import { registerGetNetknifeStateTool } from './getNetknifeState.js';
 import { registerGetNtpSettingTool } from './getNtpSetting.js';
 import { registerGetOsgCustomAclListTool } from './getOsgCustomAclList.js';
 import { registerGetOspfInterfaceTool } from './getOspfInterface.js';
@@ -328,6 +330,8 @@ import { registerListUpgradeOverviewFirmwaresTool } from './listUpgradeOverviewF
 import { registerListWireguardTool } from './listWireguard.js';
 import { registerListWireguardPeersTool } from './listWireguardPeers.js';
 import { registerSearchDevicesTool } from './searchDevices.js';
+import { registerSetApLoadBalanceTool } from './setApLoadBalance.js';
+import { registerSetApRadioConfigTool } from './setApRadioConfig.js';
 import { registerSetClientRateLimitTool } from './setClientRateLimit.js';
 import { registerSetClientRateLimitProfileTool } from './setClientRateLimitProfile.js';
 
@@ -546,6 +550,10 @@ const TOOL_REGISTRY: ToolEntry[] = [
     { fn: registerGetChannelsTool, category: 'wireless-radio', permission: 'read' },
     { fn: registerGetInterferenceTool, category: 'wireless-radio', permission: 'read' },
     { fn: registerGetRetryAndDroppedRateTool, category: 'wireless-radio', permission: 'read' },
+    { fn: registerGetNetknifeStateTool, category: 'wireless-radio', permission: 'read' },
+    { fn: registerSetApRadioConfigTool, category: 'wireless-radio', permission: 'write' },
+    { fn: registerSetApLoadBalanceTool, category: 'wireless-radio', permission: 'write' },
+    { fn: registerApplyNetknifePlanTool, category: 'wireless-radio', permission: 'write' },
 
     // --- Wireless auth ---
     { fn: registerGetOuiProfileListTool, category: 'wireless-auth', permission: 'read' },

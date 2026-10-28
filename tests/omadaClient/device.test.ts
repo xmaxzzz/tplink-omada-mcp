@@ -586,6 +586,24 @@ describe('omadaClient/device', () => {
         });
     });
 
+    describe('modifyRadiosConfig', () => {
+        it('should PATCH AP radio config', async () => {
+            const body = { radioSetting5g: { radioEnable: true, channel: '36', freq: 5180 } };
+            (mockRequest as unknown as { patch: ReturnType<typeof vi.fn> }).patch = vi.fn().mockResolvedValue({ errorCode: 0 });
+            const result = await deviceOps.modifyRadiosConfig('AA-BB-CC-DD-EE-FF', body, 'site-1');
+            expect(result).toBeUndefined();
+            expect((mockRequest as unknown as { patch: ReturnType<typeof vi.fn> }).patch).toHaveBeenCalledWith(
+                '/api/sites/site-1/aps/AA-BB-CC-DD-EE-FF/radio-config',
+                body,
+                undefined
+            );
+        });
+
+        it('should throw if apMac is empty', async () => {
+            await expect(deviceOps.modifyRadiosConfig('', {}, 'site-1')).rejects.toThrow('An apMac must be provided.');
+        });
+    });
+
     describe('getApVlanConfig', () => {
         it('should return AP VLAN config', async () => {
             const mockResponse: OmadaApiResponse<unknown> = { errorCode: 0, result: { managementVlan: 10 } };
@@ -851,6 +869,24 @@ describe('omadaClient/device', () => {
     describe('getSitesApsLoadBalance', () => {
         it('should return AP load balance config', async () => {
             await testMacMethod('getSitesApsLoadBalance', 'AP-01', '/api/sites/site-1/aps/AP-01/load-balance', 'An apMac must be provided.');
+        });
+    });
+
+    describe('modifyApLoadBalanceConfig', () => {
+        it('should PATCH AP load balance config', async () => {
+            const body = { maxClientsEnable2g: false, maxClients2g: 1, rssiEnable5g: true, threshold5g: -75 };
+            (mockRequest as unknown as { patch: ReturnType<typeof vi.fn> }).patch = vi.fn().mockResolvedValue({ errorCode: 0 });
+            const result = await deviceOps.modifyApLoadBalanceConfig('AA-BB-CC-DD-EE-FF', body, 'site-1', { 'X-Test': '1' });
+            expect(result).toBeUndefined();
+            expect((mockRequest as unknown as { patch: ReturnType<typeof vi.fn> }).patch).toHaveBeenCalledWith(
+                '/api/sites/site-1/aps/AA-BB-CC-DD-EE-FF/load-balance',
+                body,
+                { 'X-Test': '1' }
+            );
+        });
+
+        it('should throw if apMac is empty', async () => {
+            await expect(deviceOps.modifyApLoadBalanceConfig('', {}, 'site-1')).rejects.toThrow('An apMac must be provided.');
         });
     });
 

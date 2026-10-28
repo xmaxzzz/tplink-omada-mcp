@@ -276,7 +276,7 @@ an implementation tracker, and a reference for coding agents.
 | devices-ap | `getApVlanConfig` | GET | Get Ap Vlan Config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/vlan` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/vlan'].get` | ✅ Implemented |
 | devices-ap | `getMeshStatistics` | GET | Get ap mesh statistics | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/mesh/statistics` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/mesh/statistics'].get` | ✅ Implemented |
 | devices-ap | `getRadiosConfig` | GET | Get ap radio config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config'].get` | ✅ Implemented |
-| devices-ap | `getRadiosConfig` | PATCH | Modify ap radio config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config'].patch` | ✅ Implemented |
+| devices-ap | `setApRadioConfig` | PATCH | Modify ap radio config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/radio-config'].patch` | ✅ Implemented |
 | devices-ap | `getRFScanResult` | GET | Get rf scan result | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result'].get` | ✅ Implemented |
 | devices-ap | `getRFScanResult` | GET | Get rf scan result | `/openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result` | `docs/openapi/03-device.json` | `$.paths['/openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/rf-scan-result'].get` | ✅ Implemented |
 | devices-ap | `getSitesApsAfc` | GET | Get ap AFC Status Info | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/afc` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/afc'].get` | ⬜ Not implemented |
@@ -305,7 +305,7 @@ an implementation tracker, and a reference for coding agents.
 | devices-ap | `updateSitesApsChannelLimit` | PUT | Modify ap channel limit config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/channel-limit` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/channel-limit'].put` | ⬜ Not implemented |
 | devices-ap | `updateSitesApsIpSetting` | PATCH | Modify ap ip setting | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ip-setting` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ip-setting'].patch` | ⬜ Not implemented |
 | devices-ap | `updateSitesApsIpv6Setting` | PATCH | Modify ap ipv6 setting | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ipv6-setting` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ipv6-setting'].patch` | ⬜ Not implemented |
-| devices-ap | `updateSitesApsLoadBalance` | PATCH | Modify Ap Load Balance Config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/load-balance` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/load-balance'].patch` | ⬜ Not implemented |
+| devices-ap | `setApLoadBalance` | PATCH | Modify Ap Load Balance Config (`modifyApLoadBalanceConfig`) | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/load-balance` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/load-balance'].patch` | ✅ Implemented |
 | devices-ap | `updateSitesApsOfdma` | PATCH | Modify ap OFDMA config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ofdma` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/ofdma'].patch` | ⬜ Not implemented |
 | devices-ap | `updateSitesApsOverride` | PATCH | Modify ap WLANs override config | `/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/override` | `docs/openapi/03-device.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/aps/{apMac}/override'].patch` | ⬜ Not implemented |
 | devices-ap | `updateSitesApsOverride` | PATCH | Modify ap WLANs override config | `/openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/override` | `docs/openapi/03-device.json` | `$.paths['/openapi/v2/{omadacId}/sites/{siteId}/aps/{apMac}/override'].patch` | ⬜ Not implemented |
@@ -440,6 +440,27 @@ an implementation tracker, and a reference for coding agents.
 | wireless-radio | `getSitesRfplanningHistory` | GET | get RF Planning Deploy History | `/openapi/v1/{omadacId}/sites/{siteId}/rfplanning/history` | `docs/openapi/04-site-setting.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/rfplanning/history'].get` | ⬜ Not implemented |
 | wireless-radio | `updateSitesRfplanningConfig` | PUT | modify RF Planning Deploy Config | `/openapi/v1/{omadacId}/sites/{siteId}/rfPlanning/config` | `docs/openapi/04-site-setting.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/rfPlanning/config'].put` | ⬜ Not implemented |
 | wireless-radio | `updateSitesRfplanningExcludeaps` | PUT | modify Exclude Aps | `/openapi/v1/{omadacId}/sites/{siteId}/rfPlanning/excludeAps` | `docs/openapi/04-site-setting.json` | `$.paths['/openapi/v1/{omadacId}/sites/{siteId}/rfPlanning/excludeAps'].put` | ⬜ Not implemented |
+
+### Composite tools (NetKnife exchange, `netknife-omada/1`)
+
+Built on verified routes only: `GET /sites/{siteId}`, `GET /sites/{siteId}/devices`, `GET /sites/{siteId}/aps/{apMac}`,
+`GET|PATCH /sites/{siteId}/aps/{apMac}/radio-config`, `GET /sites/{siteId}/aps/{apMac}/available-channel`, `GET|PATCH /sites/{siteId}/aps/{apMac}/load-balance` (all in `docs/openapi/02-organization.json` / `03-device.json`).
+Format spec: https://github.com/xmaxzzz/NetKnife/blob/HEAD/docs/OMADA-EXCHANGE.md
+
+| Category | Tool | Permission | Description | Status |
+|---|---|---|---|---|
+| wireless-radio | `getNetknifeState` | read | Radio state of every AP in the site as `kind: "state"` | ✅ Implemented |
+| wireless-radio | `setApRadioConfig` | write | Change one AP radio (channel / width / TX power / enabled); `dryRun` default `true`; verify after PATCH | ✅ Implemented |
+| wireless-radio | `setApLoadBalance` | write | RSSI Threshold (`rssiEnable`/`threshold`) or max clients of one AP band; full GET body sent back with PATCH; `dryRun` default `true`; verify after PATCH (`ignored`, `sideEffects`) | ✅ Implemented |
+| wireless-radio | `applyNetknifePlan` | write | Apply a `kind: "plan"` file AP by AP with backup, `current` check, `force`, `stopOnError`; `dryRun` default `true`; channels checked against available list before any write; `warnings` (3+ APs on one channel, Helpdesk `warnings`, numeric strings in `current` normalized) never block; `radios` strict; APs not on the controller → `skipped` (no stop); plan `unmanaged` / `unchanged` only reported | ✅ Implemented |
+
+Field mapping (`ApRadioSetting`): width 20→`"2"`, 40→`"3"`, 80→`"5"`, 160→`"7"`, 240→`"9"`, 320→`"10"`, auto→`"4"` (2g) / `"6"` (5g) / `"8"` (6g);
+txPowerMode low/medium/high/custom/auto → `txPowerLevel` 0/1/2/3/4 (`txPower` only with custom);
+channel N → `channel: "N"` + `freq` from available-channel; auto → `channel: "0"` without `freq`.
+
+`setApLoadBalance` field mapping: `band` b → `rssiEnable{b}`, `threshold{b}`, `maxClientsEnable{b}`, `maxClients{b}` (b = 2g/5g/5g2/6g, as in the 6.x GET response).
+`rssiEnable*` / `threshold*` / `maxClientsEnable*` are **not in the spec** (`UpdateApAdvancedLoadBalanceOpenApiVO` has only `enable`, `maxClients2g/5g/5g1/5g2/6g`); they come from the real GET response — check `verified` / `ignored` after the first write on a new controller version.
+An empty `channelRange` is filled with every available-channel `freq` of that radio when the channel is written (the controller corrects a channel outside `channelRange`); a non-empty one is sent as read.
 
 ## Category: wireless-auth
 

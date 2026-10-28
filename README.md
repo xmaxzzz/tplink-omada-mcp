@@ -56,6 +56,14 @@ A Model Context Protocol (MCP) server implemented in TypeScript that exposes the
 
    Replace the environment variable values with your actual Omada controller credentials.
 
+   To let Claude read and **change** AP radio settings (NetKnife Wi-Fi planning: `getNetknifeState`, `setApRadioConfig`, `setApLoadBalance`, `applyNetknifePlan`), add the categories explicitly — radio write tools are off by default:
+
+   ```json
+   "-e", "OMADA_TOOL_CATEGORIES=dashboard:r,devices-all:r,wireless-all:r,wireless-radio:rw",
+   ```
+
+   Both write tools default to `dryRun: true`; always review the returned diff before repeating the call with `dryRun: false`.
+
 4. **Restart Claude Desktop** to load the new MCP server configuration.
 
 5. **Verify the connection** by asking Claude to list your Omada sites or devices.
@@ -119,7 +127,7 @@ Each token is `<category>[:<suffix>]`. Permission suffixes:
 
 ##### Category Reference
 
-Categories marked with `*` are reserved for upcoming phases and have no tool implementations yet. Specifying them will produce a startup warning and they will be skipped. Write tools are currently limited to the `clients` category.
+Categories marked with `*` are reserved for upcoming phases and have no tool implementations yet. Specifying them will produce a startup warning and they will be skipped. Write tools are currently limited to the `clients` and `wireless-radio` categories (`setApRadioConfig`, `setApLoadBalance`, `applyNetknifePlan`).
 
 | Group                   | Categories                                                                    |
 | ----------------------- | ----------------------------------------------------------------------------- |
@@ -161,6 +169,9 @@ OMADA_TOOL_CATEGORIES=all:rw
 
 # Network read + client write operations
 OMADA_TOOL_CATEGORIES=network-all:r,clients:rw
+
+# NetKnife Wi-Fi planning: read everything wireless + write AP radio settings
+OMADA_TOOL_CATEGORIES=dashboard:r,devices-all:r,wireless-all:r,wireless-radio:rw
 ```
 
 #### Omada Client Configuration
@@ -415,6 +426,10 @@ In client-credentials mode the server already treats `Mcp-Session-Id` as optiona
 | `getStackNetworkList` | Gets VLAN network list for a switch stack (paginated). Requires `stackId`. |
 | `getApUplinkConfig` | Gets uplink configuration for an AP (wired/mesh mode). Requires `apMac`. |
 | `getRadiosConfig` | Gets per-radio configuration for an AP (channel, power, width). Requires `apMac`. |
+| `getNetknifeState` | Snapshot of every AP's radio settings (channel, width, TX power, allowed channels/widths) as a NetKnife `netknife-omada/1` state file. Category `wireless-radio` (read). |
+| `setApRadioConfig` | **Write.** Change channel / width / TX power / on-off of one AP radio (`band` 2g/5g/5g1/5g2/6g). Validates against available channels, re-reads and verifies. `dryRun` defaults to `true`. Category `wireless-radio` (write). |
+| `setApLoadBalance` | **Write.** RSSI Threshold (`rssiEnable` / `threshold`, −95…−40 dBm) or max clients (`maxClientsEnable` / `maxClients`, 1–512) of one AP band (`band` 2g/5g/5g2/6g). Sends the whole current config back with only the passed fields changed, re-reads and verifies: `ignored` lists fields the controller did not take (`verified: false`), `sideEffects` lists untouched fields that changed. Warns on a threshold above −70 dBm and on RSSI cut-off at 2.4 GHz (IoT). `dryRun` defaults to `true`. Category `wireless-radio` (write). |
+| `applyNetknifePlan` | **Write.** Apply a NetKnife `netknife-omada/1` plan AP by AP (match by MAC, name fallback), radios only. Returns a state backup and per-AP results. `dryRun` defaults to `true`, `force` / `stopOnError` control mismatches and failures. Channels outside the AP's available list are rejected before any write (with `stopOnError` the whole plan is blocked). `warnings` lists 3+ APs on one channel and the plan's optional Helpdesk `warnings` (`[{code, band, aps, text}]`) — advisory, never blocking. Numeric strings in the plan's `current` block (older exports: `"36"`, `"20"`) are read as numbers with a `plan_current_strings` warning; `radios` is validated strictly (numbers or `"auto"`). APs not on the controller (no MAC and no unique name, or an unknown MAC) are `skipped` with a reason, not an error. The optional plan lists `unmanaged` / `unchanged` (`[{name, mac, reason, text}]`) are never written, only reported (`unmanaged`, `unchanged`, `report`). An empty `channelRange` on the AP is filled with its allowed channels when the channel is written (`notes`). Category `wireless-radio` (write). |
 | `getApVlanConfig` | Get VLAN configuration for an access point, including management VLAN and per-SSID VLAN tagging settings. |
 | `getMeshStatistics` | Gets mesh link statistics for an AP. Requires `apMac`. |
 | `getRFScanResult` | Gets last RF scan results for an AP. Requires `apMac`. |
@@ -700,6 +715,8 @@ In client-credentials mode the server already treats `Mcp-Session-Id` as optiona
 | `getGatewayLanPortStatus` | Get LAN port status for a specific gateway.               | `getGatewayLanStatus` |
 | `getGatewayPorts` | Get port info for a specific gateway.                     | `getGatewayPorts` |
 | `getAp` | Get detailed info for a specific access point.            | `getApDetail` |
+| `modifyRadiosConfig` | Modify AP radio config (PATCH `/aps/{apMac}/radio-config`). | `setApRadioConfig`, `applyNetknifePlan` |
+| `modifyApLoadBalanceConfig` | Modify AP load balance config (PATCH `/aps/{apMac}/load-balance`). RSSI fields are taken from the 6.x GET response, not from the spec. | `setApLoadBalance` |
 | `getApRadios` | Get radio info for a specific access point.               | `getApRadios` |
 | `getStackPorts` | Get port info for a switch stack.                         | `getStackPorts` |
 | `getGridPendingDevices` | List devices pending adoption in a site.                  | `listPendingDevices` |

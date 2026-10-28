@@ -5,6 +5,7 @@ import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
 import type { OmadaConnectionConfig } from '../config.js';
 import type {
     ActiveClientInfo,
+    ApLoadBalanceConfig,
     ClientActivity,
     ClientPastConnection,
     ClientRateLimitSetting,
@@ -351,6 +352,14 @@ export class OmadaClient {
     public async getRadiosConfig(apMac: string, siteId?: string, customHeaders?: CustomHeaders): Promise<unknown> {
         return await this.deviceOps.getRadiosConfig(apMac, siteId, customHeaders);
     }
+    public async modifyRadiosConfig(
+        apMac: string,
+        config: Record<string, unknown>,
+        siteId?: string,
+        customHeaders?: CustomHeaders
+    ): Promise<unknown> {
+        return await this.deviceOps.modifyRadiosConfig(apMac, config, siteId, customHeaders);
+    }
     public async getApVlanConfig(apMac: string, siteId?: string, customHeaders?: CustomHeaders): Promise<unknown> {
         return await this.deviceOps.getApVlanConfig(apMac, siteId, customHeaders);
     }
@@ -432,6 +441,15 @@ export class OmadaClient {
 
     public async getSitesApsLoadBalance(apMac: string, siteId?: string, customHeaders?: CustomHeaders): Promise<unknown> {
         return await this.deviceOps.getSitesApsLoadBalance(apMac, siteId, customHeaders);
+    }
+
+    public async modifyApLoadBalanceConfig(
+        apMac: string,
+        config: ApLoadBalanceConfig,
+        siteId?: string,
+        customHeaders?: CustomHeaders
+    ): Promise<unknown> {
+        return await this.deviceOps.modifyApLoadBalanceConfig(apMac, config, siteId, customHeaders);
     }
 
     public async getSitesApsOfdma(apMac: string, siteId?: string, customHeaders?: CustomHeaders): Promise<unknown> {

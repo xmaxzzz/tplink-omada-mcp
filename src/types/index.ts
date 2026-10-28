@@ -1,4 +1,5 @@
 export type { ActiveClientInfo } from './activeClientInfo.js';
+export type { ApLoadBalanceConfig } from './apLoadBalance.js';
 export type { ClientActivity, GetClientActivityOptions } from './clientActivity.js';
 export type { ClientPastConnection, ListClientsPastConnectionsOptions } from './clientPastConnection.js';
 export type { CustomHeaders } from './customHeaders.js';
