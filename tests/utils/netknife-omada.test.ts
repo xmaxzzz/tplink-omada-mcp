@@ -2,16 +2,23 @@ import { readFileSync } from 'node:fs';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { RSSI_THRESHOLD_MAX, RSSI_THRESHOLD_MIN } from '../../src/tools/setApLoadBalance.js';
 import * as loggerModule from '../../src/utils/logger.js';
 import {
     applyApRadioChanges,
     applyNetknifePlan,
     channelDetailsFor,
+    checkNetknifePlan,
     collectNetknifeState,
     compactChange,
     currentMismatches,
     formatMac,
     helpdeskWarnings,
+    LB_THRESHOLD_MAX,
+    LB_THRESHOLD_MIN,
+    loadBalanceBand,
+    loadBalanceFromConfig,
+    loadBalanceStateSchema,
     type NetknifeState,
     normalizeMac,
     normalizePlanCurrent,
@@ -26,7 +33,7 @@ import {
     settingForWrite,
     toIsoCountry,
 } from '../../src/utils/netknife-omada.js';
-import { createFakeOmada, exampleAp, exampleAvailableChannels, type FakeAp } from '../helpers/fakeOmada.js';
+import { createFakeOmada, exampleAp, exampleAvailableChannels, exampleLoadBalance, type FakeAp } from '../helpers/fakeOmada.js';
 
 const fixture = JSON.parse(readFileSync(new URL('../fixtures/netknife-omada-state.json', import.meta.url), 'utf8')) as NetknifeState;
 
@@ -1069,6 +1076,383 @@ describe('utils/netknife-omada', () => {
             expect(settingForWrite(fixed, { channel: 132 })).toBe(fixed);
             const auto = { channel: '0', txPower: 20 };
             expect(settingForWrite(auto, { txPower: 17 })).toBe(auto);
+        });
+    });
+
+    describe('loadBalance (netknife-omada/1 RSSI threshold block)', () => {
+        const MAC = '3C-64-CF-69-9A-64';
+        const options = { dryRun: true, force: false, stopOnError: true };
+        const lbPlan = (ap: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+            format: 'netknife-omada/1',
+            kind: 'plan',
+            ...extra,
+            aps: [{ name: 'Кухня', mac: MAC, radios: {}, ...ap }],
+        });
+        const parseLb = (loadBalance: unknown) => () => parseNetknifePlan(lbPlan({ loadBalance }));
+
+        describe('schema', () => {
+            it('accepts valid blocks, null bands and plans/states without the block', () => {
+                const plan = parseNetknifePlan(
+                    lbPlan({
+                        loadBalance: { '2g': null, '5g': { rssiEnable: true, threshold: -70 }, '6g': { rssiEnable: false } },
+                        current: { '5g': { channel: 36 }, loadBalance: { '2g': { rssiEnable: false, threshold: -85 }, '5g': null } },
+                    })
+                );
+                expect(plan.aps[0].loadBalance).toEqual({ '2g': null, '5g': { rssiEnable: true, threshold: -70 }, '6g': { rssiEnable: false } });
+                expect(plan.aps[0].current?.loadBalance).toEqual({ '2g': { rssiEnable: false, threshold: -85 }, '5g': null });
+                expect(parseNetknifePlan(lbPlan({ loadBalance: null })).aps[0].loadBalance).toBeNull();
+                expect(parseNetknifePlan(planFromState(fixture)).aps[0].loadBalance).toBeUndefined();
+                expect(parseNetknifePlan(lbPlan({ loadBalance: { '5g': { rssiEnable: true, threshold: -95 } } })).aps).toHaveLength(1);
+                expect(parseNetknifePlan(lbPlan({ loadBalance: { '5g': { rssiEnable: false, threshold: -40 } } })).aps).toHaveLength(1);
+                for (const band of Object.values(fixture.aps[0].loadBalance ?? {})) expect(loadBalanceStateSchema.parse(band)).toEqual(band);
+            });
+
+            it('rejects contract violations with readable messages', () => {
+                expect(parseLb({ '5g': { rssiEnable: true, threshold: '-70' } })).toThrow(
+                    'aps.0.loadBalance.5g.threshold: threshold must be an integer dBm in -95…-40 (a number, not a string)'
+                );
+                expect(parseLb({ '5g': { rssiEnable: true, threshold: -96 } })).toThrow(
+                    'aps.0.loadBalance.5g.threshold: threshold must be an integer dBm'
+                );
+                expect(parseLb({ '5g': { rssiEnable: true, threshold: -39 } })).toThrow('aps.0.loadBalance.5g.threshold');
+                expect(parseLb({ '5g': { rssiEnable: true, threshold: -70.5 } })).toThrow('aps.0.loadBalance.5g.threshold');
+                expect(parseLb({ '5g': { rssiEnable: true } })).toThrow(
+                    'aps.0.loadBalance.5g.threshold: threshold is required when rssiEnable is true'
+                );
+                expect(parseLb({ '5g': { threshold: -70 } })).toThrow('aps.0.loadBalance.5g.rssiEnable: rssiEnable is required');
+                expect(parseLb({ '5g': { rssiEnable: 'yes', threshold: -70 } })).toThrow('rssiEnable must be true or false');
+                expect(parseLb({ '5g': { rssiEnable: true, threshold: -70, maxClients: 30 } })).toThrow(
+                    "Unrecognized key(s) in object: 'maxClients'"
+                );
+                expect(parseLb({ '7g': { rssiEnable: false } })).toThrow('aps.0.loadBalance.7g');
+                expect(parseLb({ '5g': { rssiEnable: false }, '5g1': { rssiEnable: false } })).toThrow('"5g" and "5g1" both map');
+                expect(() => parseNetknifePlan(lbPlan({ current: { loadBalance: { '5g': { rssiEnable: true, threshold: '-75' } } } }))).toThrow(
+                    'aps.0.current.loadBalance.5g.threshold'
+                );
+                expect(() => parseNetknifePlan(lbPlan({ current: { '7g': {} } }))).toThrow('aps.0.current');
+            });
+
+            it('keeps the contract range in sync with setApLoadBalance', () => {
+                expect([LB_THRESHOLD_MIN, LB_THRESHOLD_MAX]).toEqual([RSSI_THRESHOLD_MIN, RSSI_THRESHOLD_MAX]);
+            });
+
+            it('normalizePlanCurrent leaves current.loadBalance as is', () => {
+                const plan = lbPlan({ current: { '5g': { channel: '36' }, loadBalance: { '5g': { rssiEnable: true, threshold: -75 } } } });
+                const { value } = normalizePlanCurrent(plan);
+                expect((value as { aps: { current: unknown }[] }).aps[0].current).toEqual({
+                    '5g': { channel: 36 },
+                    loadBalance: { '5g': { rssiEnable: true, threshold: -75 } },
+                });
+            });
+        });
+
+        describe('state', () => {
+            it('loadBalanceFromConfig keeps every band with RSSI fields', () => {
+                expect(
+                    loadBalanceFromConfig({ rssiEnable2g: true, threshold2g: '-80', rssiEnable5g: false, maxClients6g: 10, threshold5g2: -70.5 })
+                ).toEqual({ '2g': { rssiEnable: true, threshold: -80 }, '5g': { rssiEnable: false }, '5g2': { rssiEnable: false } });
+                expect(() => loadBalanceFromConfig(null)).toThrow('load-balance GET returned no config object');
+                expect(() => loadBalanceFromConfig([])).toThrow('no config object');
+                expect(loadBalanceBand('5g1')).toBe('5g');
+                expect(loadBalanceBand('6g')).toBe('6g');
+            });
+
+            it('reads load-balance of every AP with the setApLoadBalance GET', async () => {
+                const client = createFakeOmada([exampleAp()]);
+                const state = await collectNetknifeState(client, { siteId: 'site-1' });
+                expect(state.aps[0].loadBalance).toEqual({ '2g': { rssiEnable: false, threshold: -85 }, '5g': { rssiEnable: true, threshold: -75 } });
+                expect(state.warnings).toBeUndefined();
+                expect(client.getSitesApsLoadBalance).toHaveBeenCalledWith(MAC, 'site-1', undefined);
+            });
+
+            it('a failed load-balance read of one AP omits its block and warns, the rest of the state stays', async () => {
+                const [a, b] = manyAps(2);
+                const client = createFakeOmada([a, { ...b, loadBalance: undefined }]);
+                const state = await collectNetknifeState(client);
+                expect(state.aps[0].loadBalance).toBeDefined();
+                expect(state.aps[1]).not.toHaveProperty('loadBalance');
+                expect(state.aps[1].radios['5g']?.channel).toBe(36);
+                expect(state.aps[1].error).toBeUndefined();
+                expect(state.aps[1].loadBalanceError).toContain('load-balance is not supported');
+                expect(state.warnings).toEqual([
+                    `AP-2 (${b.mac}): load-balance not read, loadBalance omitted — Omada API error -1: load-balance is not supported`,
+                ]);
+                expect(loggerModule.logger.warn).toHaveBeenCalledWith('NetKnife state: load-balance not read', expect.any(Object));
+
+                client.getSitesApsLoadBalance.mockRejectedValueOnce('boom');
+                expect((await collectNetknifeState(client)).aps[0].loadBalanceError).toBe('boom');
+            });
+
+            it('does not read load-balance of an AP whose radios could not be read', async () => {
+                const client = createFakeOmada([exampleAp()]);
+                client.getRadiosConfig.mockRejectedValueOnce(new Error('AP offline'));
+                const state = await collectNetknifeState(client);
+                expect(state.aps[0].error).toBe('AP offline');
+                expect(client.getSitesApsLoadBalance).not.toHaveBeenCalled();
+                expect(state.warnings).toBeUndefined();
+            });
+        });
+
+        describe('currentMismatches', () => {
+            const ap = () => structuredClone(fixture.aps[0]);
+
+            it('compares rssiEnable and threshold, skips null/absent fields', () => {
+                expect(currentMismatches(ap(), { loadBalance: { '5g': { rssiEnable: true, threshold: -75 }, '2g': null } })).toEqual([]);
+                expect(currentMismatches(ap(), { loadBalance: { '5g': { rssiEnable: false, threshold: -70 } } })).toEqual([
+                    'loadBalance.5g.rssiEnable: plan expects false, controller has true',
+                    'loadBalance.5g.threshold: plan expects -70, controller has -75',
+                ]);
+                expect(currentMismatches(ap(), { loadBalance: { '5g1': { rssiEnable: true } } })).toEqual([]);
+                expect(currentMismatches(ap(), { loadBalance: { '6g': { rssiEnable: false } } })).toEqual([
+                    'loadBalance.6g: the controller returns no RSSI threshold for this band',
+                ]);
+                const noThreshold = { ...ap(), loadBalance: { '5g': { rssiEnable: true } } };
+                expect(currentMismatches(noThreshold, { loadBalance: { '5g': { rssiEnable: true, threshold: -75 } } })).toEqual([]);
+            });
+
+            it('reports a load-balance that could not be read', () => {
+                const unread = { ...ap(), loadBalance: undefined, loadBalanceError: 'timeout' };
+                const current = { loadBalance: { '2g': { rssiEnable: false }, '5g': { rssiEnable: true } } };
+                expect(currentMismatches(unread, current)).toEqual(['loadBalance: not read from the controller (timeout)']);
+                expect(currentMismatches({ ...unread, loadBalanceError: undefined }, current)).toEqual(['loadBalance: not read from the controller']);
+            });
+        });
+
+        describe('applyNetknifePlan', () => {
+            it('dry-run shows before→after of the flag and the threshold on separate lines, nothing written', async () => {
+                const client = createFakeOmada([exampleAp()]);
+                const plan = lbPlan({ loadBalance: { '5g': { rssiEnable: true, threshold: -70 }, '2g': { rssiEnable: true, threshold: -80 } } });
+                const result = await applyNetknifePlan(client, plan, options);
+                expect(result.results[0]).toMatchObject({ status: 'dry-run', diff: {} });
+                const lb = result.results[0].loadBalance;
+                expect(lb?.lines).toEqual([
+                    'loadBalance 2g rssiEnable: false → true',
+                    'loadBalance 2g threshold: -85 dBm → -80 dBm',
+                    'loadBalance 5g rssiEnable: true → true (без изменений)',
+                    'loadBalance 5g threshold: -75 dBm → -70 dBm',
+                ]);
+                expect(lb?.diff).toEqual({
+                    '2g': { rssiEnable: { from: false, to: true }, threshold: { from: -85, to: -80 } },
+                    '5g': { threshold: { from: -75, to: -70 } },
+                });
+                expect(lb?.verified).toBe(false);
+                expect(lb?.requests?.['5g']).toEqual({ ...exampleLoadBalance(), threshold5g: -70, rssiEnable5g: true });
+                expect(lb?.warnings).toEqual([
+                    '2g: IoT clients (sensors, plugs, cameras) often sit on 2.4 GHz with a weak signal and tolerate RSSI cut-off badly',
+                ]);
+                expect(client.modifyApLoadBalanceConfig).not.toHaveBeenCalled();
+                expect(client.modifyRadiosConfig).not.toHaveBeenCalled();
+            });
+
+            it('writes radios first, then load-balance of the same AP, and verifies both', async () => {
+                const client = createFakeOmada([exampleAp()]);
+                const plan = lbPlan({ radios: { '5g': { channel: 44 } }, loadBalance: { '5g': { rssiEnable: true, threshold: -68 } } });
+                const result = await applyNetknifePlan(client, plan, { ...options, dryRun: false });
+                expect(result.results[0]).toMatchObject({
+                    status: 'applied',
+                    diff: { '5g': { channel: { from: 36, to: 44 } } },
+                    loadBalance: { verified: true, diff: { '5g': { threshold: { from: -75, to: -68 } } } },
+                });
+                const radioOrder = client.modifyRadiosConfig.mock.invocationCallOrder[0];
+                const lbOrder = client.modifyApLoadBalanceConfig.mock.invocationCallOrder[0];
+                expect(radioOrder).toBeLessThan(lbOrder);
+                // full GET body merged and sent back
+                expect(client.modifyApLoadBalanceConfig).toHaveBeenCalledWith(
+                    MAC,
+                    { ...exampleLoadBalance(), threshold5g: -68 },
+                    undefined,
+                    undefined
+                );
+                expect(result.backup.aps[0].loadBalance).toEqual(fixture.aps[0].loadBalance);
+            });
+
+            it('rssiEnable false without threshold keeps the current value; a given threshold is not written (note)', async () => {
+                const client = createFakeOmada([exampleAp()]);
+                const result = await applyNetknifePlan(client, lbPlan({ loadBalance: { '5g': { rssiEnable: false } } }), {
+                    ...options,
+                    dryRun: false,
+                });
+                expect(result.results[0]).toMatchObject({
+                    status: 'applied',
+                    loadBalance: { diff: { '5g': { rssiEnable: { from: true, to: false } } } },
+                });
+                expect(result.results[0].loadBalance?.lines).toEqual([
+                    'loadBalance 5g rssiEnable: true → false',
+                    'loadBalance 5g threshold: -75 dBm → -75 dBm (без изменений)',
+                ]);
+                expect(client.modifyApLoadBalanceConfig).toHaveBeenCalledWith(
+                    MAC,
+                    { ...exampleLoadBalance(), rssiEnable5g: false },
+                    undefined,
+                    undefined
+                );
+
+                const dry = await applyNetknifePlan(
+                    createFakeOmada([exampleAp()]),
+                    lbPlan({ loadBalance: { '5g': { rssiEnable: false, threshold: -60 } } }),
+                    options
+                );
+                expect(dry.results[0].loadBalance?.notes).toEqual([
+                    'loadBalance 5g: threshold -60 not written with rssiEnable false — the controller keeps -75 dBm',
+                ]);
+                expect(dry.results[0].loadBalance?.requests?.['5g']).toMatchObject({ rssiEnable5g: false, threshold5g: -75 });
+            });
+
+            it('null / absent bands and a band already as planned send no write', async () => {
+                const client = createFakeOmada([exampleAp()]);
+                const plan = lbPlan({ loadBalance: { '2g': null, '5g': { rssiEnable: true, threshold: -75 } } });
+                const result = await applyNetknifePlan(client, plan, { ...options, dryRun: false });
+                expect(result.results[0]).toMatchObject({
+                    status: 'skipped',
+                    reason: 'no changes needed',
+                    loadBalance: { diff: {}, verified: true },
+                });
+                expect(client.modifyApLoadBalanceConfig).not.toHaveBeenCalled();
+
+                const untouched = createFakeOmada([exampleAp()]);
+                for (const loadBalance of [null, { '2g': null }]) {
+                    const r = await applyNetknifePlan(untouched, lbPlan({ radios: { '5g': { channel: 44 } }, loadBalance }), {
+                        ...options,
+                        dryRun: false,
+                    });
+                    expect(r.results[0]).not.toHaveProperty('loadBalance');
+                }
+                expect(untouched.getSitesApsLoadBalance).toHaveBeenCalledTimes(2); // backups only
+                expect(untouched.modifyApLoadBalanceConfig).not.toHaveBeenCalled();
+            });
+
+            it('maps plan 5g1 to the controller 5g keys', async () => {
+                const client = createFakeOmada([exampleAp()]);
+                await applyNetknifePlan(client, lbPlan({ loadBalance: { '5g1': { rssiEnable: true, threshold: -72 } } }), {
+                    ...options,
+                    dryRun: false,
+                });
+                expect(client.modifyApLoadBalanceConfig).toHaveBeenCalledWith(
+                    MAC,
+                    expect.objectContaining({ threshold5g: -72 }),
+                    undefined,
+                    undefined
+                );
+            });
+
+            it('a threshold the controller ignores → error with ignored keys, stops the plan', async () => {
+                const [a, b] = manyAps(2);
+                const client = createFakeOmada([a, b], { ignoreLoadBalanceKeys: ['threshold5g'] });
+                const plan = {
+                    format: 'netknife-omada/1',
+                    kind: 'plan',
+                    aps: [a, b].map((ap) => ({ mac: ap.mac, radios: {}, loadBalance: { '5g': { rssiEnable: true, threshold: -70 } } })),
+                };
+                const result = await applyNetknifePlan(client, plan, { ...options, dryRun: false });
+                expect(result.results[0]).toMatchObject({
+                    status: 'error',
+                    error: 'load-balance verification after PATCH failed (controller ignored the change)',
+                    mismatches: ['loadBalance threshold5g: expected -70, got -75'],
+                    loadBalance: { verified: false, ignored: ['threshold5g'] },
+                });
+                expect(result.results[1]).toMatchObject({ status: 'skipped', reason: 'not attempted: stopped after previous error (stopOnError)' });
+
+                const side = createFakeOmada([exampleAp()]);
+                side.modifyApLoadBalanceConfig.mockImplementationOnce(async () => {
+                    const lbNow = (await side.getSitesApsLoadBalance(MAC)) as Record<string, unknown>;
+                    side.getSitesApsLoadBalance.mockResolvedValueOnce({ ...lbNow, threshold5g: -70, maxClients2g: 50 });
+                    return undefined;
+                });
+                const sideResult = await applyNetknifePlan(side, lbPlan({ loadBalance: { '5g': { rssiEnable: true, threshold: -70 } } }), {
+                    ...options,
+                    dryRun: false,
+                });
+                expect(sideResult.results[0]).toMatchObject({
+                    status: 'applied',
+                    loadBalance: { sideEffects: { maxClients2g: { from: 100, to: 50 } } },
+                });
+            });
+
+            it('radio verification failure stops before load-balance', async () => {
+                const client = createFakeOmada([exampleAp()], { ignoreWrites: true });
+                const plan = lbPlan({ radios: { '5g': { channel: 44 } }, loadBalance: { '5g': { rssiEnable: true, threshold: -70 } } });
+                const result = await applyNetknifePlan(client, plan, { ...options, dryRun: false });
+                expect(result.results[0]).toMatchObject({ status: 'error', error: 'verification after PATCH failed' });
+                expect(client.modifyApLoadBalanceConfig).not.toHaveBeenCalled();
+            });
+
+            it('a load-balance error after written radios says the radios are already written', async () => {
+                const ap = { ...exampleAp(), loadBalance: { maxClientsEnable2g: false, maxClients2g: 100 } };
+                const client = createFakeOmada([ap]);
+                const plan = lbPlan({ radios: { '5g': { channel: 44 } }, loadBalance: { '5g': { rssiEnable: true, threshold: -70 } } });
+                const result = await applyNetknifePlan(client, plan, { ...options, dryRun: false });
+                expect(result.results[0].status).toBe('error');
+                expect(result.results[0].error).toMatch(
+                    /^loadBalance: 5g: the controller returns no RSSI threshold fields .*\(radios of this AP were already written and verified\)$/
+                );
+                expect(result.results[0].diff).toEqual({ '5g': { channel: { from: 36, to: 44 } } });
+
+                const dry = await applyNetknifePlan(createFakeOmada([ap]), plan, options);
+                expect(dry.results[0].error).not.toContain('already written');
+            });
+
+            it('current.loadBalance differing from the controller follows the radio rule: skipped unless force', async () => {
+                const plan = lbPlan({
+                    loadBalance: { '5g': { rssiEnable: true, threshold: -70 } },
+                    current: { loadBalance: { '5g': { rssiEnable: true, threshold: -80 } } },
+                });
+                const client = createFakeOmada([exampleAp()]);
+                const skipped = await applyNetknifePlan(client, plan, { ...options, dryRun: false });
+                expect(skipped.results[0]).toMatchObject({
+                    status: 'skipped',
+                    mismatches: ['loadBalance.5g.threshold: plan expects -80, controller has -75'],
+                });
+                expect(client.modifyApLoadBalanceConfig).not.toHaveBeenCalled();
+
+                const forced = await applyNetknifePlan(client, plan, { ...options, dryRun: false, force: true });
+                expect(forced.results[0]).toMatchObject({
+                    status: 'applied',
+                    mismatches: ['loadBalance.5g.threshold: plan expects -80, controller has -75'],
+                });
+                expect(client.modifyApLoadBalanceConfig).toHaveBeenCalledTimes(1);
+            });
+
+            it('backup carries the load-balance read before the write', async () => {
+                const client = createFakeOmada([exampleAp()]);
+                const result = await applyNetknifePlan(client, lbPlan({ loadBalance: { '2g': { rssiEnable: true, threshold: -82 } } }), {
+                    ...options,
+                    dryRun: false,
+                });
+                expect(result.backup.aps[0].loadBalance?.['2g']).toEqual({ rssiEnable: false, threshold: -85 });
+                expect((await collectNetknifeState(client)).aps[0].loadBalance?.['2g']).toEqual({ rssiEnable: true, threshold: -82 });
+            });
+
+            it('an entry with no radio and no load-balance change keeps the "No radio changes" error', async () => {
+                const result = await applyNetknifePlan(createFakeOmada([exampleAp()]), lbPlan({ loadBalance: { '5g': null } }), options);
+                expect(result.results[0]).toMatchObject({ status: 'error', error: expect.stringContaining('No radio changes requested') });
+            });
+        });
+
+        describe('checkNetknifePlan (offline validator)', () => {
+            it('accepts a plan with loadBalance and reports counts, notes and warnings', () => {
+                const plan = lbPlan(
+                    {
+                        loadBalance: { '5g': { rssiEnable: true, threshold: -70 }, '2g': { rssiEnable: false, threshold: -80 } },
+                        current: { '5g': { channel: '36' } },
+                    },
+                    { unchanged: [{ name: 'Холл' }] }
+                );
+                const { ok, lines } = checkNetknifePlan(`﻿${JSON.stringify(plan)}`);
+                expect(ok).toBe(true);
+                expect(lines[0]).toBe('OK: 1 APs, 0 radios, 2 loadBalance bands, 1 with MAC, 0 validation errors');
+                expect(lines).toContain('unchanged: 1: Холл');
+                expect(lines).toContain('note Кухня: loadBalance 2g threshold -80 is not written with rssiEnable false');
+                expect(lines.some((l) => l.startsWith('warning plan_current_strings'))).toBe(true);
+            });
+
+            it('rejects contract violations', () => {
+                const bad = checkNetknifePlan(JSON.stringify(lbPlan({ loadBalance: { '5g': { rssiEnable: true } } })));
+                expect(bad).toEqual({
+                    ok: false,
+                    lines: [expect.stringContaining('aps.0.loadBalance.5g.threshold: threshold is required when rssiEnable is true')],
+                });
+                expect(checkNetknifePlan('{oops').ok).toBe(false);
+            });
         });
     });
 });
