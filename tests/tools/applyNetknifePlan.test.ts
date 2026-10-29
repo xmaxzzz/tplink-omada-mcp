@@ -73,6 +73,25 @@ describe('tools/applyNetknifePlan', () => {
         expect(client.modifyRadiosConfig).toHaveBeenCalledWith('3C-64-CF-69-9A-64', expect.any(Object), 'site-1', undefined);
     });
 
+    it('applies the loadBalance block after radios and passes siteId to the load-balance PATCH', async () => {
+        const client = createFakeOmada([exampleAp()]);
+        registerApplyNetknifePlanTool(mockServer, client as unknown as OmadaClient);
+        const withLb = { ...plan, aps: [{ ...plan.aps[0], loadBalance: { '5g': { rssiEnable: true, threshold: -70 } } }] };
+        const dry = JSON.parse((await toolHandler({ plan: withLb }, { sessionId: 's' })).content[0].text);
+        expect(dry.results[0].loadBalance.lines).toContain('loadBalance 5g threshold: -75 dBm → -70 dBm');
+        expect(client.modifyApLoadBalanceConfig).not.toHaveBeenCalled();
+        const result = await toolHandler({ plan: withLb, dryRun: false, siteId: 'site-1' }, { sessionId: 's' });
+        const body = JSON.parse(result.content[0].text);
+        expect(body.results[0]).toMatchObject({ status: 'applied', loadBalance: { verified: true } });
+        expect(client.modifyApLoadBalanceConfig).toHaveBeenCalledWith(
+            '3C-64-CF-69-9A-64',
+            expect.objectContaining({ threshold5g: -70 }),
+            'site-1',
+            undefined
+        );
+        expect(toolConfig.description).toContain('loadBalance');
+    });
+
     it('returns warnings (plan check + Helpdesk) in the tool output', async () => {
         const client = createFakeOmada([exampleAp()]);
         registerApplyNetknifePlanTool(mockServer, client as unknown as OmadaClient);

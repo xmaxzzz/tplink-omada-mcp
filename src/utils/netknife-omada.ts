@@ -1,7 +1,10 @@
 import { z } from 'zod';
 
 import type { OmadaClient } from '../omadaClient/index.js';
-import type { CustomHeaders } from '../types/index.js';
+// Import cycle with setApLoadBalance (it imports formatMac from here): neither module uses the other's bindings at
+// top level, only inside functions, so either load order works. Keep it that way.
+import { type ApplyLoadBalanceResult, applyApLoadBalanceChange, LOAD_BALANCE_BANDS, type LoadBalanceBand } from '../tools/setApLoadBalance.js';
+import type { ApLoadBalanceConfig, CustomHeaders } from '../types/index.js';
 
 import { logger } from './logger.js';
 
@@ -16,6 +19,11 @@ import { logger } from './logger.js';
  * - channel → channel (string) + freq taken from the AP's available-channel list; "auto" → channel "0", freq removed.
  *   radio-config returns `channel` as a channel index (ApChannelDetail.index), so it is decoded via freq; when the
  *   channel is not changed only freq is written back (see settingForWrite).
+ *
+ * loadBalance (RSSI threshold, next to radios) maps to GET/PATCH /aps/{apMac}/load-balance:
+ * `{"5g": {rssiEnable, threshold}}` ↔ `rssiEnable5g` / `threshold5g`. The controller has no 5g1 keys, so plan "5g1"
+ * is written as "5g" (the same way radios expose radioSetting5g1 as "5g"). Writes go through applyApLoadBalanceChange
+ * (setApLoadBalance): the full GET body is merged and sent back, the flag and the value are verified separately.
  */
 
 export const NETKNIFE_FORMAT = 'netknife-omada/1';
@@ -45,13 +53,29 @@ export interface RadioState {
     widths: number[];
 }
 
+/** RSSI threshold range of the loadBalance block, dBm. Same bound as RSSI_THRESHOLD_* in setApLoadBalance (not
+ * imported: the zod schemas below are built at load time, see the import-cycle note above). */
+export const LB_THRESHOLD_MIN = -95;
+export const LB_THRESHOLD_MAX = -40;
+
+/** One band of the loadBalance block: RSSI threshold flag and value (dBm). */
+export interface LoadBalanceState {
+    rssiEnable: boolean;
+    threshold?: number;
+}
+export type ApLoadBalanceState = Partial<Record<RadioBand, LoadBalanceState>>;
+
 export interface ApState {
     name: string;
     mac: string;
     ip: string | null;
     model: string | null;
     radios: Partial<Record<RadioBand, RadioState>>;
+    /** RSSI threshold per band as read by GET load-balance; absent when that read failed (see loadBalanceError). */
+    loadBalance?: ApLoadBalanceState;
     error?: string;
+    /** Why loadBalance is absent: the load-balance GET failed (radios are still reported). */
+    loadBalanceError?: string;
 }
 
 export interface NetknifeState {
@@ -62,6 +86,8 @@ export interface NetknifeState {
     generated: string;
     country: string | null;
     aps: ApState[];
+    /** Non-fatal read problems (e.g. load-balance of one AP not read). Absent when there are none. */
+    warnings?: string[];
 }
 
 export const radioChangeSchema = z.object({
@@ -87,6 +113,58 @@ const currentRadioSchema = z
 
 const bandSchema = z.enum(RADIO_BANDS);
 
+const LB_THRESHOLD_TEXT = `threshold must be an integer dBm in ${LB_THRESHOLD_MIN}…${LB_THRESHOLD_MAX}`;
+const lbThresholdSchema = z
+    .number({ invalid_type_error: `${LB_THRESHOLD_TEXT} (a number, not a string)` })
+    .int({ message: LB_THRESHOLD_TEXT })
+    .min(LB_THRESHOLD_MIN, { message: LB_THRESHOLD_TEXT })
+    .max(LB_THRESHOLD_MAX, { message: LB_THRESHOLD_TEXT });
+const lbRssiEnableSchema = z.boolean({
+    required_error: 'rssiEnable is required (true/false)',
+    invalid_type_error: 'rssiEnable must be true or false',
+});
+
+/**
+ * One band of the plan loadBalance block: what to write. threshold is required with rssiEnable true; with rssiEnable
+ * false it may be omitted — the controller keeps its current value. Unknown fields are rejected.
+ */
+export const loadBalancePlanSchema = z
+    .object({ rssiEnable: lbRssiEnableSchema, threshold: lbThresholdSchema.optional() })
+    .strict()
+    .refine((lb) => !lb.rssiEnable || lb.threshold !== undefined, {
+        message: 'threshold is required when rssiEnable is true',
+        path: ['threshold'],
+    });
+export type LoadBalancePlan = z.infer<typeof loadBalancePlanSchema>;
+
+/** One band of the state loadBalance block (and of plan current.loadBalance): as read from the controller. */
+export const loadBalanceStateSchema = z.object({ rssiEnable: lbRssiEnableSchema, threshold: lbThresholdSchema.optional() }).strict();
+
+// current.loadBalance is a reconciliation hint copied from the state: strict integers, but no range check — whatever
+// the controller holds must round-trip.
+const currentLoadBalanceSchema = z
+    .object({
+        rssiEnable: lbRssiEnableSchema,
+        threshold: z.number({ invalid_type_error: 'threshold must be an integer dBm (a number, not a string)' }).int().optional(),
+    })
+    .passthrough();
+
+const currentSchema = z
+    .object({
+        '2g': currentRadioSchema.nullish(),
+        '5g': currentRadioSchema.nullish(),
+        '5g1': currentRadioSchema.nullish(),
+        '5g2': currentRadioSchema.nullish(),
+        '6g': currentRadioSchema.nullish(),
+        loadBalance: z.record(bandSchema, currentLoadBalanceSchema.nullish()).nullish(),
+    })
+    .strict();
+
+/** Plan "5g1" and "5g" both address the controller's 5g load-balance keys — only one of them may be set. */
+function singleFiveGig(block: Partial<Record<RadioBand, unknown>> | null | undefined): boolean {
+    return !(block?.['5g'] && block['5g1']);
+}
+
 export const netknifePlanSchema = z.object({
     format: z.literal(NETKNIFE_FORMAT),
     kind: z.literal('plan'),
@@ -98,7 +176,11 @@ export const netknifePlanSchema = z.object({
                 name: z.string().nullish(),
                 mac: z.string().nullish(),
                 radios: z.record(bandSchema, radioChangeSchema.passthrough().nullish()).default({}),
-                current: z.record(bandSchema, currentRadioSchema.nullish()).nullish(),
+                loadBalance: z
+                    .record(bandSchema, loadBalancePlanSchema.nullish())
+                    .nullish()
+                    .refine(singleFiveGig, { message: '"5g" and "5g1" both map to the controller 5g load-balance keys — set only one' }),
+                current: currentSchema.nullish(),
             })
             .refine((ap) => Boolean(ap.mac || ap.name), { message: 'each AP needs mac or name' })
     ),
@@ -151,7 +233,14 @@ const CHANGE_FIELDS = ['enabled', 'channel', 'width', 'txPowerMode', 'txPower'] 
 
 export type RadioClient = Pick<
     OmadaClient,
-    'listDevices' | 'getSiteDetail' | 'getApDetail' | 'getRadiosConfig' | 'getSitesApsAvailableChannel' | 'modifyRadiosConfig'
+    | 'listDevices'
+    | 'getSiteDetail'
+    | 'getApDetail'
+    | 'getRadiosConfig'
+    | 'getSitesApsAvailableChannel'
+    | 'modifyRadiosConfig'
+    | 'getSitesApsLoadBalance'
+    | 'modifyApLoadBalanceConfig'
 >;
 
 interface ChannelDetail {
@@ -400,6 +489,47 @@ export function settingForWrite(merged: RadioSetting, change: CompactRadioChange
     return body;
 }
 
+/** Plan / state band → suffix of the load-balance keys ("5g1" → "5g": the controller has no 5g1 keys). */
+export function loadBalanceBand(band: RadioBand): LoadBalanceBand {
+    return band === '5g1' ? '5g' : band;
+}
+
+/** One band of a load-balance GET body in the exchange form, or undefined when the band has no RSSI fields. */
+function loadBalanceBandState(config: ApLoadBalanceConfig, band: LoadBalanceBand): LoadBalanceState | undefined {
+    const flag = `rssiEnable${band}`;
+    const value = `threshold${band}`;
+    if (!(flag in config) && !(value in config)) return undefined;
+    const threshold = asNumber(config[value]);
+    return { rssiEnable: config[flag] === true, ...(threshold !== undefined && Number.isInteger(threshold) ? { threshold } : {}) };
+}
+
+/**
+ * The loadBalance block of a state from a GET load-balance body: every band whose RSSI fields the controller returns.
+ * Throws when the body is not an object.
+ */
+export function loadBalanceFromConfig(config: unknown): ApLoadBalanceState {
+    if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('load-balance GET returned no config object');
+    const result: ApLoadBalanceState = {};
+    for (const band of LOAD_BALANCE_BANDS) {
+        const state = loadBalanceBandState(config as ApLoadBalanceConfig, band);
+        if (state) result[band] = state;
+    }
+    return result;
+}
+
+function dbm(value: number | undefined): string {
+    return value === undefined ? '—' : `${value} dBm`;
+}
+
+/** before→after of one planned band, the flag and the threshold on separate lines. */
+export function loadBalanceLines(band: RadioBand, from: LoadBalanceState, to: LoadBalanceState): string[] {
+    const mark = (changed: boolean) => (changed ? '' : ' (без изменений)');
+    return [
+        `loadBalance ${band} rssiEnable: ${from.rssiEnable} → ${to.rssiEnable}${mark(from.rssiEnable !== to.rssiEnable)}`,
+        `loadBalance ${band} threshold: ${dbm(from.threshold)} → ${dbm(to.threshold)}${mark(from.threshold !== to.threshold)}`,
+    ];
+}
+
 // ---------------------------------------------------------------------------
 // Client-backed operations
 // ---------------------------------------------------------------------------
@@ -507,6 +637,94 @@ export async function applyApRadioChanges(
     return { apMac: mac, dryRun: false, before, after, diff, verified, ...(verified ? {} : { mismatches }), ...extra };
 }
 
+export interface ApplyLoadBalancePlanResult {
+    /** Bands that change: rssiEnable / threshold from → to (exchange form, plan band keys). */
+    diff: Partial<Record<RadioBand, FieldDiff>>;
+    /** before→after of every planned band, the flag and the threshold on separate lines. */
+    lines: string[];
+    /** dryRun: not checked (false); write: every written band re-read and matched. */
+    verified: boolean;
+    /** dryRun: full PATCH body per band that would be written. */
+    requests?: Partial<Record<RadioBand, ApLoadBalanceConfig>>;
+    /** Omada keys the controller did not take (re-read differs), e.g. "threshold5g". */
+    ignored?: string[];
+    mismatches?: Record<string, { expected: unknown; actual: unknown }>;
+    /** Untouched load-balance keys that changed between GET and re-read. */
+    sideEffects?: Record<string, { from: unknown; to: unknown }>;
+    warnings?: string[];
+    notes?: string[];
+}
+
+function bandFromResult(result: ApplyLoadBalanceResult, side: 'before' | 'after'): LoadBalanceState {
+    return loadBalanceBandState(result[side], result.band) ?? { rssiEnable: false };
+}
+
+/**
+ * Apply the plan loadBalance block of one AP, band by band, through applyApLoadBalanceChange (GET, merge into the
+ * full body, PATCH, re-read, flag and value verified separately). null / absent bands are not touched; a band already
+ * matching the plan is not written. With rssiEnable false and no threshold the current value stays. A threshold given
+ * with rssiEnable false is not written either (setApLoadBalance rule: the value only applies with the flag on) — noted.
+ */
+export async function applyApLoadBalancePlan(
+    client: RadioClient,
+    apMac: string,
+    block: Partial<Record<RadioBand, LoadBalancePlan | null>>,
+    options: ApplyRadioOptions
+): Promise<ApplyLoadBalancePlanResult> {
+    const { siteId, customHeaders } = options;
+    const diff: ApplyLoadBalancePlanResult['diff'] = {};
+    const lines: string[] = [];
+    const requests: NonNullable<ApplyLoadBalancePlanResult['requests']> = {};
+    const ignored: string[] = [];
+    const mismatches: NonNullable<ApplyLoadBalancePlanResult['mismatches']> = {};
+    const sideEffects: NonNullable<ApplyLoadBalancePlanResult['sideEffects']> = {};
+    const warnings: string[] = [];
+    const notes: string[] = [];
+
+    for (const band of RADIO_BANDS) {
+        const lb = block[band];
+        if (!lb) continue;
+        const lbBand = loadBalanceBand(band);
+        const change = { rssiEnable: lb.rssiEnable, ...(lb.rssiEnable ? { threshold: lb.threshold } : {}) };
+        const preview = await applyApLoadBalanceChange(client, apMac, lbBand, change, { dryRun: true, siteId, customHeaders });
+        const from = bandFromResult(preview, 'before');
+        const to = bandFromResult(preview, 'after');
+        lines.push(...loadBalanceLines(band, from, to));
+        if (!lb.rssiEnable && lb.threshold !== undefined && lb.threshold !== from.threshold) {
+            notes.push(
+                `loadBalance ${band}: threshold ${lb.threshold} not written with rssiEnable false — the controller keeps ${dbm(from.threshold)}`
+            );
+        }
+        const bandDiff: FieldDiff = {};
+        if (from.rssiEnable !== to.rssiEnable) bandDiff.rssiEnable = { from: from.rssiEnable, to: to.rssiEnable };
+        if (from.threshold !== to.threshold) bandDiff.threshold = { from: from.threshold ?? null, to: to.threshold ?? null };
+        if (Object.keys(bandDiff).length === 0) continue;
+        diff[band] = bandDiff;
+        if (options.dryRun) {
+            if (preview.request) requests[band] = preview.request;
+            warnings.push(...(preview.warnings ?? []));
+            continue;
+        }
+        const result = await applyApLoadBalanceChange(client, apMac, lbBand, change, { dryRun: false, siteId, customHeaders });
+        warnings.push(...(result.warnings ?? []));
+        ignored.push(...(result.ignored ?? []));
+        Object.assign(mismatches, result.mismatches ?? {});
+        Object.assign(sideEffects, result.sideEffects ?? {});
+    }
+
+    const verified = !options.dryRun && ignored.length === 0;
+    return {
+        diff,
+        lines,
+        verified,
+        ...(Object.keys(requests).length > 0 ? { requests } : {}),
+        ...(ignored.length > 0 ? { ignored, mismatches } : {}),
+        ...(Object.keys(sideEffects).length > 0 ? { sideEffects } : {}),
+        ...(warnings.length > 0 ? { warnings: [...new Set(warnings)] } : {}),
+        ...(notes.length > 0 ? { notes } : {}),
+    };
+}
+
 export interface CollectStateOptions {
     siteId?: string;
     siteName?: string;
@@ -525,6 +743,7 @@ export async function collectNetknifeState(client: RadioClient, options: Collect
     const aps = devices.filter((d) => String(d.type ?? '').toLowerCase() === 'ap');
 
     const result: ApState[] = [];
+    const warnings: string[] = [];
     for (const device of aps) {
         const mac = formatMac(device.mac);
         const base: ApState = { name: device.name ?? mac, mac, ip: str(device.ip), model: str(device.model), radios: {} };
@@ -539,8 +758,18 @@ export async function collectNetknifeState(client: RadioClient, options: Collect
         } catch (error) {
             base.error = error instanceof Error ? error.message : String(error);
         }
+        // A failed load-balance read does not fail the AP: the block is left out and reported.
+        if (!base.error) {
+            try {
+                base.loadBalance = loadBalanceFromConfig(await client.getSitesApsLoadBalance(mac, siteId, customHeaders));
+            } catch (error) {
+                base.loadBalanceError = error instanceof Error ? error.message : String(error);
+                warnings.push(`${base.name} (${mac}): load-balance not read, loadBalance omitted — ${base.loadBalanceError}`);
+            }
+        }
         result.push(base);
     }
+    if (warnings.length > 0) logger.warn('NetKnife state: load-balance not read', { warnings: warnings.join(' | ') });
 
     const omadaSite = str(site.name);
     return {
@@ -551,6 +780,7 @@ export async function collectNetknifeState(client: RadioClient, options: Collect
         generated: new Date().toISOString(),
         country: toIsoCountry(site.region),
         aps: result,
+        ...(warnings.length > 0 ? { warnings } : {}),
     };
 }
 
@@ -566,6 +796,8 @@ export interface ApplyPlanApResult {
     mismatches?: string[];
     request?: Record<string, unknown>;
     notes?: string[];
+    /** Present when the plan has a loadBalance block for the AP: applied after its radios. */
+    loadBalance?: ApplyLoadBalancePlanResult;
 }
 
 export interface ApplyPlanOptions {
@@ -633,7 +865,8 @@ export function normalizePlanCurrent(value: unknown): { value: unknown; warnings
         const fields: string[] = [];
         const nextCurrent = Object.fromEntries(
             Object.entries(current).map(([band, rawRadio]) => {
-                if (typeof rawRadio !== 'object' || rawRadio === null) return [band, rawRadio];
+                // loadBalance is validated strictly (integers only), never normalized.
+                if (band === 'loadBalance' || typeof rawRadio !== 'object' || rawRadio === null) return [band, rawRadio];
                 const radio: Record<string, unknown> = { ...(rawRadio as Record<string, unknown>) };
                 for (const field of CURRENT_NUMERIC_FIELDS) {
                     const v = radio[field];
@@ -690,6 +923,35 @@ export function parseNetknifePlan(input: unknown, warnings?: PlanWarning[]): Net
     return parsed.data;
 }
 
+/**
+ * Offline check of a plan file (scripts/validate-netknife-plan.ts): the same parser applyNetknifePlan uses, no
+ * controller access. ok=false → lines hold the validation errors; ok=true → a summary, the plan lists and warnings.
+ */
+export function checkNetknifePlan(text: string): { ok: boolean; lines: string[] } {
+    const warnings: PlanWarning[] = [];
+    let plan: NetknifePlan;
+    try {
+        plan = parseNetknifePlan(text.replace(/^\uFEFF/, ''), warnings);
+    } catch (error) {
+        return { ok: false, lines: [error instanceof Error ? error.message : String(error)] };
+    }
+    const radios = plan.aps.reduce((n, ap) => n + Object.values(ap.radios).filter(Boolean).length, 0);
+    const lbBands = plan.aps.reduce((n, ap) => n + Object.values(ap.loadBalance ?? {}).filter(Boolean).length, 0);
+    const lines = [
+        `OK: ${plan.aps.length} APs, ${radios} radios, ${lbBands} loadBalance bands, ${plan.aps.filter((ap) => ap.mac).length} with MAC, 0 validation errors`,
+        ...planListReport(plan),
+    ];
+    for (const ap of plan.aps) {
+        for (const [band, lb] of Object.entries(ap.loadBalance ?? {})) {
+            if (lb && !lb.rssiEnable && lb.threshold !== undefined) {
+                lines.push(`note ${ap.name ?? ap.mac}: loadBalance ${band} threshold ${lb.threshold} is not written with rssiEnable false`);
+            }
+        }
+    }
+    for (const w of [...warnings, ...helpdeskWarnings(plan.warnings)]) lines.push(`warning ${w.code}: ${w.text}`);
+    return { ok: true, lines };
+}
+
 function findAp(state: NetknifeState, mac: string | null | undefined, name: string | null | undefined): ApState | undefined {
     if (mac) {
         const byMac = state.aps.find((ap) => normalizeMac(ap.mac) === normalizeMac(mac));
@@ -702,10 +964,14 @@ function findAp(state: NetknifeState, mac: string | null | undefined, name: stri
     return undefined;
 }
 
-/** Compare the plan's "current" block with the live state. Fields that are null on either side are not compared. */
+/**
+ * Compare the plan's "current" block (radios and loadBalance) with the live state. Fields that are null/absent on
+ * either side are not compared. A current.loadBalance against an AP whose load-balance could not be read is a mismatch.
+ */
 export function currentMismatches(ap: ApState, current: NetknifePlan['aps'][number]['current']): string[] {
+    const { loadBalance, ...radios } = current ?? {};
     const mismatches: string[] = [];
-    for (const [band, expected] of Object.entries(current ?? {}) as [RadioBand, z.infer<typeof currentRadioSchema> | null][]) {
+    for (const [band, expected] of Object.entries(radios) as [RadioBand, z.infer<typeof currentRadioSchema> | null][]) {
         if (!expected) continue;
         const actual = ap.radios[band];
         if (!actual) {
@@ -717,6 +983,24 @@ export function currentMismatches(ap: ApState, current: NetknifePlan['aps'][numb
             const have = actual[field];
             if (want === null || want === undefined || have === null) continue;
             if (want !== have) mismatches.push(`${band}.${field}: plan expects ${String(want)}, controller has ${String(have)}`);
+        }
+    }
+    for (const [band, expected] of Object.entries(loadBalance ?? {}) as [RadioBand, z.infer<typeof currentLoadBalanceSchema> | null][]) {
+        if (!expected) continue;
+        if (!ap.loadBalance) {
+            mismatches.push(`loadBalance: not read from the controller${ap.loadBalanceError ? ` (${ap.loadBalanceError})` : ''}`);
+            break;
+        }
+        const actual = ap.loadBalance[band] ?? ap.loadBalance[loadBalanceBand(band)];
+        if (!actual) {
+            mismatches.push(`loadBalance.${band}: the controller returns no RSSI threshold for this band`);
+            continue;
+        }
+        for (const field of ['rssiEnable', 'threshold'] as const) {
+            const want = expected[field];
+            const have = actual[field];
+            if (want === null || want === undefined || have === undefined) continue;
+            if (want !== have) mismatches.push(`loadBalance.${band}.${field}: plan expects ${String(want)}, controller has ${String(have)}`);
         }
     }
     return mismatches;
@@ -883,33 +1167,69 @@ export async function applyNetknifePlan(client: RadioClient, planInput: unknown,
             results.push({ ...matched, status: 'skipped', reason: 'plan "current" differs from the controller (use force to override)', mismatches });
             continue;
         }
+        // Radios first, then the load-balance of the same AP. An entry with only a loadBalance block skips the radio
+        // step; an entry with neither keeps the "No radio changes requested" error.
+        const lbBlock = entry.loadBalance && Object.values(entry.loadBalance).some(Boolean) ? entry.loadBalance : undefined;
+        const radioRequested = Object.values(entry.radios).some((change) => Object.keys(compactChange(change)).length > 0);
+        const applyOptions = { dryRun: options.dryRun, siteId: options.siteId, customHeaders: options.customHeaders };
+        let radio: ApplyRadioResult | undefined;
         try {
-            const outcome = await applyApRadioChanges(client, ap.mac, entry.radios, {
-                dryRun: options.dryRun,
-                siteId: options.siteId,
-                customHeaders: options.customHeaders,
-            });
-            const extra = { ...(mismatches.length > 0 ? { mismatches } : {}), ...(outcome.notes ? { notes: outcome.notes } : {}) };
-            if (Object.keys(outcome.diff).length === 0) {
-                results.push({ ...matched, ...extra, status: 'skipped', reason: 'no changes needed', diff: {} });
-            } else if (outcome.dryRun) {
-                results.push({ ...matched, ...extra, status: 'dry-run', diff: outcome.diff, request: outcome.request });
-            } else if (!outcome.verified) {
-                results.push({
-                    ...matched,
-                    status: 'error',
-                    diff: outcome.diff,
-                    error: 'verification after PATCH failed',
-                    mismatches: outcome.mismatches,
-                    ...(outcome.notes ? { notes: outcome.notes } : {}),
-                });
-                stopped = options.stopOnError;
-            } else {
-                results.push({ ...matched, ...extra, status: 'applied', diff: outcome.diff });
-            }
+            if (radioRequested || !lbBlock) radio = await applyApRadioChanges(client, ap.mac, entry.radios, applyOptions);
         } catch (error) {
             results.push({ ...matched, status: 'error', error: error instanceof Error ? error.message : String(error) });
             stopped = options.stopOnError;
+            continue;
+        }
+        const radioDiff = radio?.diff ?? {};
+        const radioChanged = Object.keys(radioDiff).length > 0;
+        const notes = radio?.notes ? { notes: radio.notes } : {};
+        if (radio && radioChanged && !radio.dryRun && !radio.verified) {
+            results.push({
+                ...matched,
+                status: 'error',
+                diff: radioDiff,
+                error: 'verification after PATCH failed',
+                mismatches: radio.mismatches,
+                ...notes,
+            });
+            stopped = options.stopOnError;
+            continue;
+        }
+
+        let lb: ApplyLoadBalancePlanResult | undefined;
+        if (lbBlock) {
+            try {
+                lb = await applyApLoadBalancePlan(client, ap.mac, lbBlock, applyOptions);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                const radiosWritten = radioChanged && !options.dryRun ? ' (radios of this AP were already written and verified)' : '';
+                results.push({ ...matched, status: 'error', diff: radioDiff, error: `loadBalance: ${message}${radiosWritten}`, ...notes });
+                stopped = options.stopOnError;
+                continue;
+            }
+        }
+        const lbChanged = lb !== undefined && Object.keys(lb.diff).length > 0;
+        const extra = { ...(mismatches.length > 0 ? { mismatches } : {}), ...notes, ...(lb ? { loadBalance: lb } : {}) };
+
+        if (!radioChanged && !lbChanged) {
+            results.push({ ...matched, ...extra, status: 'skipped', reason: 'no changes needed', diff: {} });
+        } else if (options.dryRun) {
+            results.push({ ...matched, ...extra, status: 'dry-run', diff: radioDiff, ...(radio?.request ? { request: radio.request } : {}) });
+        } else if (lb && lbChanged && !lb.verified) {
+            const lbMismatches = Object.entries(lb.mismatches ?? {}).map(
+                ([key, m]) => `loadBalance ${key}: expected ${String(m.expected)}, got ${String(m.actual)}`
+            );
+            results.push({
+                ...matched,
+                ...extra,
+                status: 'error',
+                diff: radioDiff,
+                error: 'load-balance verification after PATCH failed (controller ignored the change)',
+                mismatches: lbMismatches,
+            });
+            stopped = options.stopOnError;
+        } else {
+            results.push({ ...matched, ...extra, status: 'applied', diff: radioDiff });
         }
     }
 

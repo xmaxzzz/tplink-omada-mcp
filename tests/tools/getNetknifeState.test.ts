@@ -41,6 +41,7 @@ describe('tools/getNetknifeState', () => {
         const state = JSON.parse(result.content[0].text);
         expect(state).toMatchObject({ format: 'netknife-omada/1', kind: 'state', site: 'Алые паруса', country: 'RU' });
         expect(state.aps[0].radios['5g'].channel).toBe(36);
+        expect(state.aps[0].loadBalance).toEqual({ '2g': { rssiEnable: false, threshold: -85 }, '5g': { rssiEnable: true, threshold: -75 } });
         expect(client.getSiteDetail).toHaveBeenCalledWith('site-1', undefined);
     });
 

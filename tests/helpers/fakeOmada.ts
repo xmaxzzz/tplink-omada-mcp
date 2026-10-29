@@ -12,6 +12,8 @@ export interface FakeAp {
     model?: string;
     config: Record<string, Setting>;
     available: unknown;
+    /** GET load-balance body; undefined → the GET fails (AP without load-balance). */
+    loadBalance?: Setting;
 }
 
 export interface FakeOmadaOptions {
@@ -27,6 +29,8 @@ export interface FakeOmadaOptions {
      * and a written freq wins over the written channel (the channel is corrected based on freq).
      */
     channelIndex?: boolean;
+    /** Load-balance keys the PATCH is accepted for but not stored (the controller ignores them via OpenAPI). */
+    ignoreLoadBalanceKeys?: string[];
     site?: Record<string, unknown>;
 }
 
@@ -95,6 +99,21 @@ export function exampleAp(): FakeAp {
             },
         },
         available: exampleAvailableChannels(),
+        loadBalance: exampleLoadBalance(),
+    };
+}
+
+/** GET load-balance body of a dual-band AP on a 6.x controller (no 5g1 keys, RSSI fields only for 2g/5g). */
+export function exampleLoadBalance(): Setting {
+    return {
+        maxClientsEnable2g: false,
+        maxClients2g: 100,
+        rssiEnable2g: false,
+        threshold2g: -85,
+        maxClientsEnable5g: false,
+        maxClients5g: 100,
+        rssiEnable5g: true,
+        threshold5g: -75,
     };
 }
 
@@ -137,6 +156,19 @@ export function createFakeOmada(aps: FakeAp[], options: FakeOmadaOptions = {}) {
                     ap.config[key] = next;
                 }
             }
+            return undefined;
+        }),
+        getSitesApsLoadBalance: vi.fn(async (mac: string) => {
+            const ap = await find(mac);
+            if (!ap.loadBalance) throw new Error('Omada API error -1: load-balance is not supported');
+            return structuredClone(ap.loadBalance);
+        }),
+        modifyApLoadBalanceConfig: vi.fn(async (mac: string, body: Record<string, unknown>) => {
+            const ap = await find(mac);
+            if (options.ignoreWrites) return undefined;
+            const next = structuredClone(body);
+            for (const key of options.ignoreLoadBalanceKeys ?? []) next[key] = ap.loadBalance?.[key];
+            ap.loadBalance = next;
             return undefined;
         }),
     };

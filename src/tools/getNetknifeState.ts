@@ -14,7 +14,7 @@ export function registerGetNetknifeStateTool(server: McpServer, client: OmadaCli
         'getNetknifeState',
         {
             description:
-                'Snapshot radio settings of every AP in a site as a NetKnife exchange file (format "netknife-omada/1", kind "state"): per AP name, mac, ip, model and radios 2g/5g/6g with enabled, channel, width, txPowerMode, txPower and the channels/widths Omada allows. Read-only. Save the JSON and load it into NetKnife ("Загрузить из Omada").',
+                'Snapshot radio settings of every AP in a site as a NetKnife exchange file (format "netknife-omada/1", kind "state"): per AP name, mac, ip, model and radios 2g/5g/6g with enabled, channel, width, txPowerMode, txPower and the channels/widths Omada allows, plus loadBalance (RSSI threshold per band: {rssiEnable, threshold}) from GET load-balance. A failed load-balance read of one AP only omits its loadBalance block and is listed in `warnings`. Read-only. Save the JSON and load it into NetKnife ("Загрузить из Omada").',
             inputSchema: inputSchema.shape,
         },
         wrapToolHandler('getNetknifeState', async ({ siteId, siteName, customHeaders }) =>
